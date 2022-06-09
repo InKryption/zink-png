@@ -126,10 +126,11 @@ pub fn PngRawChunkStream(comptime ReaderType: type) type {
                     self.state = .end;
 
                     var bytes: [png_signature.len]u8 = undefined;
-                    if (util.io.readNoEof(self.reader, &bytes)) |maybe_bytes_read|
-                        (if (maybe_bytes_read != null) return StartResult{ .initial_read_fail = .{ .err = null } })
-                    else |err| {
+                    const bytes_read = self.reader.readAll(&bytes) catch |err| {
                         return StartResult{ .initial_read_fail = .{ .err = err } };
+                    };
+                    if (bytes_read != bytes.len) {
+                        return StartResult{ .initial_read_fail = .{ .err = null } };
                     }
 
                     if (!std.mem.eql(u8, &bytes, &png_signature)) {
@@ -468,21 +469,18 @@ test {
 
 const util = struct {
     const io = struct {
-        /// Attempts to read bytes into the entire buffer; if the stream ends before filling the provided buffer,
-        /// returns the number of bytes read, otherwise, returns 'null'.
-        pub fn readNoEof(reader: anytype, buf: []u8) @TypeOf(reader).Error!?usize {
-            const amt_read = try reader.readAll(buf);
-            return if (amt_read < buf.len) amt_read else null;
+        pub fn readBytesNoEof(reader: anytype, comptime num_bytes: usize) @TypeOf(reader).Error!?[num_bytes]u8 {
+            var buffer: [num_bytes]u8 = undefined;
+            const bytes_read = try reader.readAll(&buffer);
+            return if (bytes_read < buffer.len) null else buffer;
         }
 
         /// Tries to read a BE integer from the stream; if the stream ends before supplying enough bytes
         /// for such an integer, returns null.
         pub fn readIntBigOrNull(reader: anytype, comptime T: type) @TypeOf(reader).Error!?T {
-            var buffer: [(@typeInfo(T).Int.bits + 7) / 8]u8 = undefined;
-            return if ((try readNoEof(reader, &buffer)) != null)
-                null
-            else
-                std.mem.readIntBig(T, &buffer);
+            const byte_count = (@typeInfo(T).Int.bits + 7) / 8;
+            const bytes = (try readBytesNoEof(reader, byte_count)) orelse return null;
+            return std.mem.readIntBig(T, &bytes);
         }
     };
 };
