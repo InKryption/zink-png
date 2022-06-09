@@ -100,6 +100,66 @@ pub const ChunkType = enum(u32) {
     }
 };
 
+pub fn rawChunkBufferStream(buffer: []const u8) RawChunkBufferStream {
+    return RawChunkBufferStream.init(buffer);
+}
+pub const RawChunkBufferStream = struct {
+    raw_stream: Rcs,
+    fbs: Fbs,
+
+    const Rcs = RawChunkStream(Fbs.Reader);
+    const Fbs = std.io.FixedBufferStream([]const u8);
+
+    pub fn init(buffer: []const u8) RawChunkBufferStream {
+        return .{
+            .raw_stream = Rcs.init(undefined),
+            .fbs = Fbs{
+                .buffer = buffer,
+                .pos = 0,
+            },
+        };
+    }
+
+    pub fn start(self: *RawChunkBufferStream) Rcs.StartResult {
+        self.raw_stream.reader = self.fbs.reader();
+        return self.raw_stream.start();
+    }
+
+    /// Same as `RawChunkStream`, but all returned data pointers refer to the supplied buffer.
+    pub fn next(self: *RawChunkBufferStream) ?Rcs.NextResult {
+        var buffer: [512]u8 = undefined;
+
+        const start_pos = self.fbs.pos;
+        var result: Rcs.NextResult = self.raw_stream.next(.{ .skip = &buffer }) orelse return null;
+        const end_pos = self.fbs.pos;
+
+        const chunk_segment = self.fbs.buffer[start_pos..end_pos];
+
+        switch (result) {
+            .ok => |*info| {
+                const data_segment = self.fbs.buffer[@sizeOf([2]u32) .. chunk_segment.len - @sizeOf(u32)];
+                info.p_data = data_segment.ptr;
+            },
+            .no_length_bytes => {},
+            .no_type_bytes => {},
+            .no_data_bytes => {},
+            .out_of_mem_for_data => {},
+            .partial_data_bytes_no_capture => unreachable,
+            .partial_data_bytes => |*info| {
+                const data_segment = self.fbs.buffer[@sizeOf([2]u32)..];
+                info.bytes = data_segment;
+            },
+            .no_crc_bytes_no_capture => unreachable,
+            .no_crc_bytes => |*info| {
+                const data_segment = self.fbs.buffer[@sizeOf([2]u32)..];
+                info.p_data = data_segment.ptr;
+            },
+        }
+
+        return result;
+    }
+};
+
 test {
     std.debug.print("\n", .{});
     const data: []const u8 = comptime data: {
@@ -137,18 +197,14 @@ test {
 
         break :data data;
     };
-    var data_stream = std.io.fixedBufferStream(data);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var chunk_stream = rawChunkStream(data_stream.reader());
-
-    std.debug.print("{}\n", .{chunkType("IDAT")});
-    if (true) return;
+    var chunk_stream = rawChunkBufferStream(data);
 
     try chunk_stream.start().unwrap();
-    while (chunk_stream.next(.{ .allocator = arena.allocator() })) |maybe_chunk| {
+    while (chunk_stream.next()) |maybe_chunk| {
         const chunk: RawChunk = switch (maybe_chunk) {
             .ok => |ok| ok,
 

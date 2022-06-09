@@ -13,6 +13,7 @@ pub const RawChunk = struct {
         return self.p_data[0..self.header.length];
     }
 
+    /// Should only be called if returned from a call to `RawChunkStream.next`, where an allocator was supplied;
     pub fn deinit(self: RawChunk, allocator: std.mem.Allocator) void {
         allocator.free(self.data());
     }
@@ -25,9 +26,10 @@ pub fn rawChunkStream(reader: anytype) RawChunkStream(@TypeOf(reader)) {
 pub fn RawChunkStream(comptime ReaderType: type) type {
     return struct {
         const Self = @This();
-        reader: ReaderType,
+        reader: Reader,
         state: RawChunkStreamState,
 
+        pub const Reader = ReaderType;
         pub const State = RawChunkStreamState;
         pub const StartResult = RawChunkStreamStartResult(ReaderType.Error);
         pub const NextResult = RawChunkStreamNextResult(ReaderType.Error);
@@ -65,15 +67,17 @@ pub fn RawChunkStream(comptime ReaderType: type) type {
             return .ok;
         }
 
+        pub const MaybeAllocator = union(enum) {
+            allocator: std.mem.Allocator,
+            skip: []u8,
+        };
+
         /// Returns 'null' when the stream ends after stepping through only whole chunks,
         /// or after failing to read a whole chunk.
         /// If no allocator is supplied, on success, the returned chunk will have an undefined pointer,
         /// and thus should not be used.
         /// Must have called `start` beforehand.
-        pub fn next(self: *Self, maybe_allocator: union(enum) {
-            allocator: std.mem.Allocator,
-            skip: []u8,
-        }) ?NextResult {
+        pub fn next(self: *Self, maybe_allocator: MaybeAllocator) ?NextResult {
             switch (self.state) {
                 .start => unreachable,
                 .in_progress => {},
@@ -132,7 +136,7 @@ pub fn RawChunkStream(comptime ReaderType: type) type {
                     var remaining = header.length;
                     while (remaining > 0) {
                         const amt = std.math.min(remaining, buffer.len);
-                        const bytes_skipped = self.reader.readAll(buffer) catch |err| return NextResult{
+                        const bytes_skipped = self.reader.readAll(buffer[0..amt]) catch |err| return NextResult{
                             .partial_data_bytes_no_capture = NextResult.PartialDataBytesNoCapture{
                                 .header = header,
                                 .bytes_len = header.length - remaining,
