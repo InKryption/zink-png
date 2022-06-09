@@ -103,6 +103,10 @@ pub const ChunkType = enum(u32) {
 pub fn rawChunkBufferStream(buffer: []const u8) RawChunkBufferStream {
     return RawChunkBufferStream.init(buffer);
 }
+
+/// Wrapper over `RawChunkStream` which uses a buffer, allowing it to take advantage of the fact that it
+/// can rely on the read memory remaining valid even after subsequent read calls to the reader,
+/// avoiding allocations in favor of direct references to aforementioned buffer.
 pub const RawChunkBufferStream = struct {
     raw_stream: Rcs,
     fbs: Fbs,
@@ -125,38 +129,71 @@ pub const RawChunkBufferStream = struct {
         return self.raw_stream.start();
     }
 
-    /// Same as `RawChunkStream`, but all returned data pointers refer to the supplied buffer.
-    pub fn next(self: *RawChunkBufferStream) ?Rcs.NextResult {
-        var buffer: [512]u8 = undefined;
+    pub const NextResult = union(enum) {
+        ok: RawChunk,
+        no_length_bytes: Rcs.NextResult.NoLengthBytes,
+        no_type_bytes: Rcs.NextResult.NoTypeBytes,
+        partial_data_bytes: Rcs.NextResult.PartialDataBytes,
+        no_crc_bytes: Rcs.NextResult.NoCrcBytes,
+    };
 
+    pub fn next(self: *RawChunkBufferStream) ?NextResult {
+        return self.nextWithSkipSize(512);
+    }
+
+    pub fn nextWithSkipSize(self: *RawChunkBufferStream, comptime skip_buffer_bytes: usize) ?NextResult {
+        var skip_buffer: [skip_buffer_bytes]u8 = undefined;
+        return self.nextWithSkipBuffer(&skip_buffer);
+    }
+
+    /// Same as `RawChunkStream`, but all returned data pointers refer to the supplied buffer.
+    /// Skip buffer will be used as scratch space to skip over data;
+    pub fn nextWithSkipBuffer(self: *RawChunkBufferStream, skip_buffer: []u8) ?NextResult {
         const start_pos = self.fbs.pos;
-        var result: Rcs.NextResult = self.raw_stream.next(.{ .skip = &buffer }) orelse return null;
+        const result: Rcs.NextResult = self.raw_stream.next(.{ .skip = skip_buffer }) orelse return null;
         const end_pos = self.fbs.pos;
 
         const chunk_segment = self.fbs.buffer[start_pos..end_pos];
 
-        switch (result) {
-            .ok => |*info| {
-                const data_segment = self.fbs.buffer[@sizeOf([2]u32) .. chunk_segment.len - @sizeOf(u32)];
-                info.p_data = data_segment.ptr;
-            },
-            .no_length_bytes => {},
-            .no_type_bytes => {},
-            .no_data_bytes => {},
-            .out_of_mem_for_data => {},
-            .partial_data_bytes_no_capture => unreachable,
-            .partial_data_bytes => |*info| {
-                const data_segment = self.fbs.buffer[@sizeOf([2]u32)..];
-                info.bytes = data_segment;
-            },
-            .no_crc_bytes_no_capture => unreachable,
-            .no_crc_bytes => |*info| {
-                const data_segment = self.fbs.buffer[@sizeOf([2]u32)..];
-                info.p_data = data_segment.ptr;
-            },
-        }
+        return switch (result) {
+            .ok => |info| blk: {
+                const data_segment = chunk_segment[@sizeOf([2]u32) .. chunk_segment.len - @sizeOf(u32)];
+                std.debug.assert(info.header.length == data_segment.len);
 
-        return result;
+                break :blk NextResult{
+                    .ok = RawChunk{
+                        .header = info.header,
+                        .p_data = data_segment.ptr,
+                        .crc = info.crc,
+                    },
+                };
+            },
+            .no_length_bytes => |info| NextResult{ .no_length_bytes = info },
+            .no_type_bytes => |info| NextResult{ .no_type_bytes = info },
+            .out_of_mem_for_data => unreachable,
+            .partial_data_bytes_no_capture => |info| blk: {
+                const partial_data_segment = chunk_segment[@sizeOf([2]u32)..];
+                std.debug.assert(info.bytes_len == partial_data_segment.len);
+
+                break :blk NextResult{ .partial_data_bytes = Rcs.NextResult.PartialDataBytes{
+                    .header = info.header,
+                    .bytes = partial_data_segment,
+                    .err = info.err,
+                } };
+            },
+            .partial_data_bytes => unreachable,
+            .no_crc_bytes_no_capture => |info| blk: {
+                const data_segment = chunk_segment[@sizeOf([2]u32)..];
+                std.debug.assert(info.header.length == data_segment.len);
+
+                break :blk NextResult{ .no_crc_bytes = Rcs.NextResult.NoCrcBytes{
+                    .header = info.header,
+                    .p_data = data_segment.ptr,
+                    .err = info.err,
+                } };
+            },
+            .no_crc_bytes => unreachable,
+        };
     }
 };
 
@@ -210,11 +247,7 @@ test {
 
             .no_length_bytes => |info| return info.err,
             .no_type_bytes => |info| return info.err orelse @panic("no_type_bytes"),
-            .no_data_bytes => |info| return info.err orelse @panic("no_data_bytes"),
-            .out_of_mem_for_data => return error.OutOfMemory,
-            .partial_data_bytes_no_capture => |info| return info.err orelse @panic("partial_data_bytes_no_capture"),
             .partial_data_bytes => |info| return info.err orelse @panic("partial_data_bytes"),
-            .no_crc_bytes_no_capture => |info| return info.err orelse @panic("no_crc_bytes_no_capture"),
             .no_crc_bytes => |info| return info.err orelse @panic("no_crc_bytes"),
         };
 

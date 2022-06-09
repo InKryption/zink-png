@@ -114,42 +114,35 @@ pub fn RawChunkStream(comptime ReaderType: type) type {
                     const data: []u8 = allocator.alloc(u8, header.length) catch |err| switch (err) {
                         error.OutOfMemory => return NextResult{ .out_of_mem_for_data = NextResult.OutOfMemForData{ .header = header } },
                     };
-                    const bytes_read = self.reader.readAll(data) catch |err| {
-                        allocator.free(data);
-                        return NextResult{ .no_data_bytes = NextResult.NoDataBytes{
-                            .header = header,
-                            .err = err,
-                        } };
-                    };
-                    std.debug.assert(bytes_read <= data.len);
-                    if (bytes_read < data.len) {
+                    const read_all_result = util.io.readAll(self.reader, data);
+                    if (read_all_result.bytes_read < data.len) {
                         return NextResult{ .partial_data_bytes = NextResult.PartialDataBytes{
                             .header = header,
-                            .bytes = allocator.shrink(data, bytes_read),
-                            .err = null,
+                            .bytes = allocator.shrink(data, read_all_result.bytes_read),
+                            .err = read_all_result.err,
                         } };
                     }
+                    std.debug.assert(read_all_result.err == null);
 
                     break :data data;
                 },
                 .skip => |buffer| data: {
-                    var remaining = header.length;
+                    var remaining: usize = header.length;
                     while (remaining > 0) {
                         const amt = std.math.min(remaining, buffer.len);
-                        const bytes_skipped = self.reader.readAll(buffer[0..amt]) catch |err| return NextResult{
-                            .partial_data_bytes_no_capture = NextResult.PartialDataBytesNoCapture{
-                                .header = header,
-                                .bytes_len = header.length - remaining,
-                                .err = err,
-                            },
-                        };
-                        if (bytes_skipped < amt) return NextResult{
-                            .partial_data_bytes_no_capture = NextResult.PartialDataBytesNoCapture{
-                                .header = header,
-                                .bytes_len = header.length - remaining,
-                                .err = null,
-                            },
-                        };
+                        const read_all_result = util.io.readAll(self.reader, buffer[0..amt]);
+
+                        if (read_all_result.bytes_read < amt) {
+                            remaining -= read_all_result.bytes_read;
+                            return NextResult{
+                                .partial_data_bytes_no_capture = NextResult.PartialDataBytesNoCapture{
+                                    .header = header,
+                                    .bytes_len = header.length - remaining,
+                                    .err = read_all_result.err,
+                                },
+                            };
+                        }
+                        std.debug.assert(read_all_result.err == null);
                         remaining -= amt;
                     }
 
@@ -207,7 +200,6 @@ const RawChunkStreamNextResultTag = enum {
     ok,
     no_length_bytes,
     no_type_bytes,
-    no_data_bytes,
     out_of_mem_for_data,
     partial_data_bytes_no_capture,
     partial_data_bytes,
@@ -247,7 +239,6 @@ fn RawChunkStreamNextResult(comptime ReadError: type) type {
         ok: RawChunk,
         no_length_bytes: NoLengthBytes,
         no_type_bytes: NoTypeBytes,
-        no_data_bytes: NoDataBytes,
         out_of_mem_for_data: OutOfMemForData,
         partial_data_bytes_no_capture: PartialDataBytesNoCapture,
         partial_data_bytes: PartialDataBytes,
@@ -264,7 +255,6 @@ fn RawChunkStreamNextResult(comptime ReadError: type) type {
             /// 'null' if stream ended.
             err: ?Error,
         };
-        pub const NoDataBytes = HeaderMaybeErrOnly;
         pub const OutOfMemForData = struct {
             header: ChunkHeader,
         };
@@ -298,6 +288,30 @@ fn RawChunkStreamNextResult(comptime ReadError: type) type {
 
 const util = struct {
     const io = struct {
+        pub fn ReadAllResult(comptime ErrorSet: type) type {
+            return struct {
+                bytes_read: usize,
+                err: ?ErrorSet,
+
+                pub fn unwrap(self: @This()) ErrorSet!usize {
+                    return self.err orelse self.bytes_read;
+                }
+            };
+        }
+        pub fn readAll(reader: anytype, buffer: []u8) ReadAllResult(@TypeOf(reader).Error) {
+            const Result = ReadAllResult(@TypeOf(reader).Error);
+
+            var index: usize = 0;
+            while (index != buffer.len) {
+                const amt = reader.read(buffer[index..]) catch |err|
+                    return Result{ .bytes_read = index, .err = err };
+                if (amt == 0) break;
+                index += amt;
+            }
+
+            return Result{ .bytes_read = index, .err = null };
+        }
+
         pub fn readBytesNoEof(reader: anytype, comptime num_bytes: usize) @TypeOf(reader).Error!?[num_bytes]u8 {
             var buffer: [num_bytes]u8 = undefined;
             const bytes_read = try reader.readAll(&buffer);
