@@ -163,7 +163,7 @@ pub const RawChunkBufferStream = struct {
                 break :blk NextResult{
                     .ok = RawChunk{
                         .header = info.header,
-                        .p_data = data_segment.ptr,
+                        .p_data = std.mem.span(data_segment).ptr,
                         .crc = info.crc,
                     },
                 };
@@ -221,12 +221,12 @@ test {
             // IDAT
             &std.mem.toBytes(std.mem.nativeToBig(u32, 17)) ++ // length
                 std.mem.toBytes(ChunkType.intBig(.IDAT)) ++ // type
-                [_]u8{ 8, 29, 1, 6, 0, 249, 255, 0, 255, 0, 0, 0, 255, 6, 0, 1, 255 } ++ // data
+                [17]u8{ 8, 29, 1, 6, 0, 249, 255, 0, 255, 0, 0, 0, 255, 6, 0, 1, 255 } ++ // data
                 std.mem.toBytes(std.mem.nativeToBig(u32, 0x68B6702C)), // crc
             // IEND
             &std.mem.toBytes(std.mem.nativeToBig(u32, 0)) ++ // length
                 std.mem.toBytes(ChunkType.intBig(.IEND)) ++ // type
-                [_]u8{} ++ // data
+                [0]u8{} ++ // data
                 std.mem.toBytes(std.mem.nativeToBig(u32, 0x68B6702C)), // crc
         }) |bytes| {
             data = data ++ bytes;
@@ -244,36 +244,28 @@ test {
     while (chunk_stream.next()) |maybe_chunk| {
         const chunk: RawChunk = switch (maybe_chunk) {
             .ok => |ok| ok,
-
             .no_length_bytes => |info| return info.err,
             .no_type_bytes => |info| return info.err orelse @panic("no_type_bytes"),
             .partial_data_bytes => |info| return info.err orelse @panic("partial_data_bytes"),
             .no_crc_bytes => |info| return info.err orelse @panic("no_crc_bytes"),
         };
+        const chunk_data = chunk.data();
 
         std.debug.print(
             \\type = '{s}'
             \\crc = 0x{X}
-            \\data = [{d}]u8{{
+            \\data = [{d}]u8{any}
+            \\
+            \\
         , .{
             @tagName(chunk.header.type),
             chunk.crc,
-            chunk.header.length,
+            chunk_data.len,
+            chunk_data,
         });
-        const cols = 24;
-        for (chunk.data()) |byte, i| {
-            if (i % cols == 0) {
-                std.debug.print("\n    ", .{});
-            }
-            std.debug.print("{d}, ", .{byte});
-        }
-        if (chunk.header.length != 0) {
-            std.debug.print("\n", .{});
-        }
-        std.debug.print("}}\n", .{});
 
         if (chunk.header.type == .IDAT and chunk.header.length != 0) {
-            var compressed_content_stream = std.io.fixedBufferStream(chunk.data());
+            var compressed_content_stream = std.io.fixedBufferStream(chunk_data);
             var decompress_stream = try std.compress.zlib.zlibStream(arena.allocator(), compressed_content_stream.reader());
             defer decompress_stream.deinit();
 
