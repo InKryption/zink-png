@@ -233,6 +233,7 @@ test {
 
     if (chunk_stream.next()) |maybe_chunk| {
         const chunk = try maybe_chunk.unwrap();
+
         try std.testing.expect(chunk.header.type.isValid());
         try std.testing.expectEqual(chunkType("IHDR"), chunk.header.type);
         try std.testing.expectEqualSlices(
@@ -242,6 +243,11 @@ test {
                 [_]u8{ 8, 0, 0, 0, 0 },
             chunk.data(),
         );
+
+        var crc_hasher = std.hash.Crc32.init();
+        crc_hasher.update(&std.mem.toBytes(chunk.header.type.intBig()));
+        crc_hasher.update(chunk.data());
+        try std.testing.expectEqual(crc_hasher.final(), chunk.crc);
     } else return error.UnexpectedNullChunk;
 
     if (chunk_stream.next()) |maybe_chunk| {
@@ -253,6 +259,11 @@ test {
             &[17]u8{ 8, 29, 1, 6, 0, 249, 255, 0, 255, 0, 0, 0, 255, 6, 0, 1, 255 },
             chunk.data(),
         );
+
+        var crc_hasher = std.hash.Crc32.init();
+        crc_hasher.update(&std.mem.toBytes(chunk.header.type.intBig()));
+        crc_hasher.update(chunk.data());
+        try std.testing.expectEqual(crc_hasher.final(), chunk.crc);
 
         var chunk_data_stream = std.io.fixedBufferStream(chunk.data());
         var zlib_stream = try std.compress.zlib.zlibStream(arena, chunk_data_stream.reader());
@@ -279,6 +290,11 @@ test {
         try std.testing.expect(chunk.header.type.isValid());
         try std.testing.expectEqual(chunkType("IEND"), chunk.header.type);
         try std.testing.expectEqualSlices(u8, &[0]u8{}, chunk.data());
+
+        var crc_hasher = std.hash.Crc32.init();
+        crc_hasher.update(&std.mem.toBytes(chunk.header.type.intBig()));
+        crc_hasher.update(chunk.data());
+        try std.testing.expectEqual(crc_hasher.final(), chunk.crc);
     } else return error.UnexpectedNullChunk;
 
     try std.testing.expectEqual(@as(?RawChunkBufferStream.NextResult, null), chunk_stream.next());
