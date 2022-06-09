@@ -13,6 +13,9 @@ pub const ChunkHeader = struct {
     type: ChunkType,
 };
 
+pub fn chunkType(bytes: *const [4]u8) ChunkType {
+    return @intToEnum(ChunkType, std.mem.readIntNative(u32, bytes));
+}
 pub const ChunkType = enum(u32) {
     pub const Tag = @typeInfo(ChunkType).Enum.tag_type;
     // Critical Chunk Types
@@ -33,6 +36,7 @@ pub const ChunkType = enum(u32) {
     tRNS = std.mem.readIntNative(u32, "tRNS"),
     zTXt = std.mem.readIntNative(u32, "zTXt"),
 
+    // Other Chunk Types
     _,
 
     pub fn intNative(self: ChunkType) Tag {
@@ -73,6 +77,12 @@ pub const ChunkType = enum(u32) {
 
     pub fn isAncillary(self: ChunkType) bool {
         return switch (self) {
+            .IHDR,
+            .PLTE,
+            .IDAT,
+            .IEND,
+            => true,
+
             .bKGD,
             .cHRM,
             .gAMA,
@@ -84,7 +94,8 @@ pub const ChunkType = enum(u32) {
             .tRNS,
             .zTXt,
             => true,
-            else => false,
+
+            _ => false,
         };
     }
 };
@@ -132,6 +143,9 @@ test {
     defer arena.deinit();
 
     var chunk_stream = rawChunkStream(data_stream.reader());
+
+    std.debug.print("{}\n", .{chunkType("IDAT")});
+    if (true) return;
 
     try chunk_stream.start().unwrap();
     while (chunk_stream.next(.{ .allocator = arena.allocator() })) |maybe_chunk| {
