@@ -1,116 +1,19 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-pub const png_signature: [8]u8 = .{ 137, 80, 78, 71, 13, 10, 26, 10 };
-
-pub const PngChunkType = enum(u32) {
-    pub const Tag = @typeInfo(PngChunkType).Enum.tag_type;
-    // Critical Chunk Types
-    IHDR = std.mem.readIntNative(u32, "IHDR"),
-    PLTE = std.mem.readIntNative(u32, "PLTE"),
-    IDAT = std.mem.readIntNative(u32, "IDAT"),
-    IEND = std.mem.readIntNative(u32, "IEND"),
-
-    // Ancillary Chunk Types
-    bKGD = std.mem.readIntNative(u32, "bKGD"),
-    cHRM = std.mem.readIntNative(u32, "cHRM"),
-    gAMA = std.mem.readIntNative(u32, "gAMA"),
-    hIST = std.mem.readIntNative(u32, "hIST"),
-    pHYs = std.mem.readIntNative(u32, "pHYs"),
-    sBIT = std.mem.readIntNative(u32, "sBIT"),
-    tEXt = std.mem.readIntNative(u32, "tEXt"),
-    tIME = std.mem.readIntNative(u32, "tIME"),
-    tRNS = std.mem.readIntNative(u32, "tRNS"),
-    zTXt = std.mem.readIntNative(u32, "zTXt"),
-
-    _,
-
-    pub fn intNative(self: PngChunkType) Tag {
-        return @enumToInt(self);
-    }
-
-    pub fn intBig(self: PngChunkType) Tag {
-        return std.mem.nativeToBig(Tag, self.intNative());
-    }
-
-    pub fn intLittle(self: PngChunkType) Tag {
-        return std.mem.nativeToLittle(Tag, self.intNative());
-    }
-
-    pub fn isCritical(self: PngChunkType) bool {
-        return switch (self) {
-            .IHDR,
-            .PLTE,
-            .IDAT,
-            .IEND,
-            => true,
-
-            .bKGD,
-            .cHRM,
-            .gAMA,
-            .hIST,
-            .pHYs,
-            .sBIT,
-            .tEXt,
-            .tIME,
-            .tRNS,
-            .zTXt,
-            => false,
-
-            _ => false,
-        };
-    }
-
-    pub fn isAncillary(self: PngChunkType) bool {
-        return switch (self) {
-            .bKGD,
-            .cHRM,
-            .gAMA,
-            .hIST,
-            .pHYs,
-            .sBIT,
-            .tEXt,
-            .tIME,
-            .tRNS,
-            .zTXt,
-            => true,
-            else => false,
-        };
-    }
-};
-
-pub const PngChunkHeader = struct {
-    length: u32,
-    type: PngChunkType,
-};
-
-pub const PngRawChunk = struct {
-    header: PngChunkHeader,
-    p_data: [*]const u8,
-    crc: u32,
-
-    pub fn data(self: PngRawChunk) []const u8 {
-        return self.p_data[0..self.header.length];
-    }
-
-    pub fn deinit(self: PngRawChunk, allocator: std.mem.Allocator) void {
-        allocator.free(self.data());
-    }
-};
-
-pub fn pngRawChunkStream(reader: anytype) PngRawChunkStream(@TypeOf(reader)) {
-    return PngRawChunkStream(@TypeOf(reader)).init(reader);
+pub fn rawChunkStream(reader: anytype) RawChunkStream(@TypeOf(reader)) {
+    return RawChunkStream(@TypeOf(reader)).init(reader);
 }
 
-pub fn PngRawChunkStream(comptime ReaderType: type) type {
+pub fn RawChunkStream(comptime ReaderType: type) type {
     return struct {
         const Self = @This();
         reader: ReaderType,
-        state: PngRawChunkStreamState,
+        state: RawChunkStreamState,
 
-        pub const State = PngRawChunkStreamState;
-        pub const StartResult = PngRawChunkStreamStartResult(ReaderType.Error);
-        pub const NextResult = PngRawChunkStreamNextResult(ReaderType.Error);
+        pub const State = RawChunkStreamState;
+        pub const StartResult = RawChunkStreamStartResult(ReaderType.Error);
+        pub const NextResult = RawChunkStreamNextResult(ReaderType.Error);
 
         pub fn init(reader: ReaderType) Self {
             return Self{
@@ -125,7 +28,7 @@ pub fn PngRawChunkStream(comptime ReaderType: type) type {
                 .start => {
                     self.state = .end;
 
-                    var bytes: [png_signature.len]u8 = undefined;
+                    var bytes: [signature.len]u8 = undefined;
                     const bytes_read = self.reader.readAll(&bytes) catch |err| {
                         return StartResult{ .initial_read_fail = .{ .err = err } };
                     };
@@ -133,7 +36,7 @@ pub fn PngRawChunkStream(comptime ReaderType: type) type {
                         return StartResult{ .initial_read_fail = .{ .err = null } };
                     }
 
-                    if (!std.mem.eql(u8, &bytes, &png_signature)) {
+                    if (!std.mem.eql(u8, &bytes, &signature)) {
                         return .bad_png_signature;
                     }
 
@@ -164,7 +67,7 @@ pub fn PngRawChunkStream(comptime ReaderType: type) type {
             // it will be set back to `in_progress`.
             self.state = .end;
 
-            const header: PngChunkHeader = header: {
+            const header: ChunkHeader = header: {
                 const length = if (util.io.readIntBigOrNull(self.reader, u32)) |maybe_int| maybe_int orelse {
                     return null;
                 } else |err| return NextResult{ .no_length_bytes = NextResult.NoLengthBytes{ .err = err } };
@@ -179,9 +82,9 @@ pub fn PngRawChunkStream(comptime ReaderType: type) type {
                     .err = err,
                 } };
 
-                break :header PngChunkHeader{
+                break :header ChunkHeader{
                     .length = length,
-                    .type = @intToEnum(PngChunkType, @"type"),
+                    .type = @intToEnum(ChunkType, @"type"),
                 };
             };
 
@@ -259,7 +162,7 @@ pub fn PngRawChunkStream(comptime ReaderType: type) type {
             self.state = .in_progress;
 
             return NextResult{
-                .ok = PngRawChunk{
+                .ok = RawChunk{
                     .header = header,
                     .p_data = data.ptr,
                     .crc = crc,
@@ -269,17 +172,114 @@ pub fn PngRawChunkStream(comptime ReaderType: type) type {
     };
 }
 
-const PngRawChunkStreamState = enum {
+pub const signature: [8]u8 = .{ 137, 80, 78, 71, 13, 10, 26, 10 };
+
+pub const ChunkType = enum(u32) {
+    pub const Tag = @typeInfo(ChunkType).Enum.tag_type;
+    // Critical Chunk Types
+    IHDR = std.mem.readIntNative(u32, "IHDR"),
+    PLTE = std.mem.readIntNative(u32, "PLTE"),
+    IDAT = std.mem.readIntNative(u32, "IDAT"),
+    IEND = std.mem.readIntNative(u32, "IEND"),
+
+    // Ancillary Chunk Types
+    bKGD = std.mem.readIntNative(u32, "bKGD"),
+    cHRM = std.mem.readIntNative(u32, "cHRM"),
+    gAMA = std.mem.readIntNative(u32, "gAMA"),
+    hIST = std.mem.readIntNative(u32, "hIST"),
+    pHYs = std.mem.readIntNative(u32, "pHYs"),
+    sBIT = std.mem.readIntNative(u32, "sBIT"),
+    tEXt = std.mem.readIntNative(u32, "tEXt"),
+    tIME = std.mem.readIntNative(u32, "tIME"),
+    tRNS = std.mem.readIntNative(u32, "tRNS"),
+    zTXt = std.mem.readIntNative(u32, "zTXt"),
+
+    _,
+
+    pub fn intNative(self: ChunkType) Tag {
+        return @enumToInt(self);
+    }
+
+    pub fn intBig(self: ChunkType) Tag {
+        return std.mem.nativeToBig(Tag, self.intNative());
+    }
+
+    pub fn intLittle(self: ChunkType) Tag {
+        return std.mem.nativeToLittle(Tag, self.intNative());
+    }
+
+    pub fn isCritical(self: ChunkType) bool {
+        return switch (self) {
+            .IHDR,
+            .PLTE,
+            .IDAT,
+            .IEND,
+            => true,
+
+            .bKGD,
+            .cHRM,
+            .gAMA,
+            .hIST,
+            .pHYs,
+            .sBIT,
+            .tEXt,
+            .tIME,
+            .tRNS,
+            .zTXt,
+            => false,
+
+            _ => false,
+        };
+    }
+
+    pub fn isAncillary(self: ChunkType) bool {
+        return switch (self) {
+            .bKGD,
+            .cHRM,
+            .gAMA,
+            .hIST,
+            .pHYs,
+            .sBIT,
+            .tEXt,
+            .tIME,
+            .tRNS,
+            .zTXt,
+            => true,
+            else => false,
+        };
+    }
+};
+
+pub const ChunkHeader = struct {
+    length: u32,
+    type: ChunkType,
+};
+
+pub const RawChunk = struct {
+    header: ChunkHeader,
+    p_data: [*]const u8,
+    crc: u32,
+
+    pub fn data(self: RawChunk) []const u8 {
+        return self.p_data[0..self.header.length];
+    }
+
+    pub fn deinit(self: RawChunk, allocator: std.mem.Allocator) void {
+        allocator.free(self.data());
+    }
+};
+
+const RawChunkStreamState = enum {
     start,
     in_progress,
     end,
 };
-const PngRawChunkStreamStartResultTag = enum {
+const RawChunkStreamStartResultTag = enum {
     ok,
     initial_read_fail,
     bad_png_signature,
 };
-const PngRawChunkStreamNextResultTag = enum {
+const RawChunkStreamNextResultTag = enum {
     ok,
     no_length_bytes,
     no_type_bytes,
@@ -291,8 +291,8 @@ const PngRawChunkStreamNextResultTag = enum {
     no_crc_bytes,
 };
 
-fn PngRawChunkStreamStartResult(comptime ReadError: type) type {
-    return union(PngRawChunkStreamStartResultTag) {
+fn RawChunkStreamStartResult(comptime ReadError: type) type {
+    return union(RawChunkStreamStartResultTag) {
         const Self = @This();
         ok,
         initial_read_fail: InitialReadFail,
@@ -317,10 +317,10 @@ fn PngRawChunkStreamStartResult(comptime ReadError: type) type {
         }
     };
 }
-fn PngRawChunkStreamNextResult(comptime ReadError: type) type {
-    return union(PngRawChunkStreamNextResultTag) {
+fn RawChunkStreamNextResult(comptime ReadError: type) type {
+    return union(RawChunkStreamNextResultTag) {
         const Self = @This();
-        ok: PngRawChunk,
+        ok: RawChunk,
         no_length_bytes: NoLengthBytes,
         no_type_bytes: NoTypeBytes,
         no_data_bytes: NoDataBytes,
@@ -342,22 +342,22 @@ fn PngRawChunkStreamNextResult(comptime ReadError: type) type {
         };
         pub const NoDataBytes = HeaderMaybeErrOnly;
         pub const OutOfMemForData = struct {
-            header: PngChunkHeader,
+            header: ChunkHeader,
         };
         pub const PartialDataBytesNoCapture = struct {
-            header: PngChunkHeader,
+            header: ChunkHeader,
             bytes_len: usize,
             /// 'null' if stream ended.
             err: ?Error,
         };
         pub const PartialDataBytes = struct {
-            header: PngChunkHeader,
+            header: ChunkHeader,
             bytes: []const u8,
             /// 'null' if stream ended.
             err: ?Error,
         };
         pub const NoCrcBytes = struct {
-            header: PngChunkHeader,
+            header: ChunkHeader,
             p_data: [*]const u8,
             /// 'null' if stream ended.
             err: ?Error,
@@ -365,7 +365,7 @@ fn PngRawChunkStreamNextResult(comptime ReadError: type) type {
         pub const NoCrcBytesNoCapture = HeaderMaybeErrOnly;
 
         const HeaderMaybeErrOnly = struct {
-            header: PngChunkHeader,
+            header: ChunkHeader,
             /// 'null' if stream ended.
             err: ?Error,
         };
@@ -379,10 +379,10 @@ test {
 
         for ([_][]const u8{
             // signature
-            &png_signature,
+            &signature,
             // IHDR
             &std.mem.toBytes(std.mem.nativeToBig(u32, 13)) ++ // length
-                std.mem.toBytes(PngChunkType.intBig(.IHDR)) ++ // type
+                std.mem.toBytes(ChunkType.intBig(.IHDR)) ++ // type
                 // data start
                 std.mem.toBytes(std.mem.nativeToBig(u32, 2)) ++ // width
                 std.mem.toBytes(std.mem.nativeToBig(u32, 2)) ++ // height
@@ -395,12 +395,12 @@ test {
                 std.mem.toBytes(std.mem.nativeToBig(u32, 0x57DD52F8)), // crc
             // IDAT
             &std.mem.toBytes(std.mem.nativeToBig(u32, 17)) ++ // length
-                std.mem.toBytes(PngChunkType.intBig(.IDAT)) ++ // type
+                std.mem.toBytes(ChunkType.intBig(.IDAT)) ++ // type
                 [_]u8{ 8, 29, 1, 6, 0, 249, 255, 0, 255, 0, 0, 0, 255, 6, 0, 1, 255 } ++ // data
                 std.mem.toBytes(std.mem.nativeToBig(u32, 0x68B6702C)), // crc
             // IEND
             &std.mem.toBytes(std.mem.nativeToBig(u32, 0)) ++ // length
-                std.mem.toBytes(PngChunkType.intBig(.IEND)) ++ // type
+                std.mem.toBytes(ChunkType.intBig(.IEND)) ++ // type
                 [_]u8{} ++ // data
                 std.mem.toBytes(std.mem.nativeToBig(u32, 0x68B6702C)), // crc
         }) |bytes| {
@@ -414,11 +414,11 @@ test {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var chunk_stream = pngRawChunkStream(data_stream.reader());
+    var chunk_stream = rawChunkStream(data_stream.reader());
 
     try chunk_stream.start().unwrap();
     while (chunk_stream.next(.{ .allocator = arena.allocator() })) |maybe_chunk| {
-        const chunk: PngRawChunk = switch (maybe_chunk) {
+        const chunk: RawChunk = switch (maybe_chunk) {
             .ok => |ok| ok,
 
             .no_length_bytes => |info| return info.err,
