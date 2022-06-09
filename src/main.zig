@@ -1,10 +1,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const raw_stream = @import("raw_stream.zig");
+const raw_chunk_stream = @import("raw_chunk_stream.zig");
 
-pub const RawChunk = raw_stream.RawChunk;
-pub const RawChunkStream = raw_stream.RawChunkStream;
-pub const rawChunkStream = raw_stream.rawChunkStream;
+pub const RawChunk = raw_chunk_stream.RawChunk;
+pub const RawChunkStream = raw_chunk_stream.RawChunkStream;
+pub const rawChunkStream = raw_chunk_stream.rawChunkStream;
 
 pub const signature: [8]u8 = .{ 137, 80, 78, 71, 13, 10, 26, 10 };
 
