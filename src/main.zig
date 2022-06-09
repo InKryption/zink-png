@@ -14,89 +14,58 @@ pub const ChunkHeader = struct {
 };
 
 pub fn chunkType(bytes: *const [4]u8) ChunkType {
-    return @intToEnum(ChunkType, std.mem.readIntNative(u32, bytes));
+    return @intToEnum(ChunkType, (std.mem.readIntBig(u32, bytes)));
 }
 pub const ChunkType = enum(u32) {
     pub const Tag = @typeInfo(ChunkType).Enum.tag_type;
     // Critical Chunk Types
-    IHDR = std.mem.readIntNative(u32, "IHDR"),
-    PLTE = std.mem.readIntNative(u32, "PLTE"),
-    IDAT = std.mem.readIntNative(u32, "IDAT"),
-    IEND = std.mem.readIntNative(u32, "IEND"),
+    IHDR = std.mem.readIntBig(u32, "IHDR"),
+    PLTE = std.mem.readIntBig(u32, "PLTE"),
+    IDAT = std.mem.readIntBig(u32, "IDAT"),
+    IEND = std.mem.readIntBig(u32, "IEND"),
 
     // Ancillary Chunk Types
-    bKGD = std.mem.readIntNative(u32, "bKGD"),
-    cHRM = std.mem.readIntNative(u32, "cHRM"),
-    gAMA = std.mem.readIntNative(u32, "gAMA"),
-    hIST = std.mem.readIntNative(u32, "hIST"),
-    pHYs = std.mem.readIntNative(u32, "pHYs"),
-    sBIT = std.mem.readIntNative(u32, "sBIT"),
-    tEXt = std.mem.readIntNative(u32, "tEXt"),
-    tIME = std.mem.readIntNative(u32, "tIME"),
-    tRNS = std.mem.readIntNative(u32, "tRNS"),
-    zTXt = std.mem.readIntNative(u32, "zTXt"),
+    bKGD = std.mem.readIntBig(u32, "bKGD"),
+    cHRM = std.mem.readIntBig(u32, "cHRM"),
+    gAMA = std.mem.readIntBig(u32, "gAMA"),
+    hIST = std.mem.readIntBig(u32, "hIST"),
+    pHYs = std.mem.readIntBig(u32, "pHYs"),
+    sBIT = std.mem.readIntBig(u32, "sBIT"),
+    tEXt = std.mem.readIntBig(u32, "tEXt"),
+    tIME = std.mem.readIntBig(u32, "tIME"),
+    tRNS = std.mem.readIntBig(u32, "tRNS"),
+    zTXt = std.mem.readIntBig(u32, "zTXt"),
 
     // Other Chunk Types
     _,
 
-    pub fn intNative(self: ChunkType) Tag {
+    pub fn str(self: ChunkType) [4]u8 {
+        return std.mem.toBytes(self.int());
+    }
+
+    pub fn isValid(self: ChunkType) bool {
+        const bytes = self.str();
+        for (bytes) |byte| {
+            switch (byte) {
+                'A'...'Z', 'a'...'z' => {},
+                else => return false,
+            }
+        }
+        return true;
+    }
+
+    pub fn int(self: ChunkType) Tag {
         return @enumToInt(self);
     }
-
     pub fn intBig(self: ChunkType) Tag {
-        return std.mem.nativeToBig(Tag, self.intNative());
+        return std.mem.nativeToBig(Tag, self.int());
     }
-
     pub fn intLittle(self: ChunkType) Tag {
-        return std.mem.nativeToLittle(Tag, self.intNative());
+        return std.mem.nativeToLittle(Tag, self.int());
     }
 
-    pub fn isCritical(self: ChunkType) bool {
-        return switch (self) {
-            .IHDR,
-            .PLTE,
-            .IDAT,
-            .IEND,
-            => true,
-
-            .bKGD,
-            .cHRM,
-            .gAMA,
-            .hIST,
-            .pHYs,
-            .sBIT,
-            .tEXt,
-            .tIME,
-            .tRNS,
-            .zTXt,
-            => false,
-
-            _ => false,
-        };
-    }
-
-    pub fn isAncillary(self: ChunkType) bool {
-        return switch (self) {
-            .IHDR,
-            .PLTE,
-            .IDAT,
-            .IEND,
-            => true,
-
-            .bKGD,
-            .cHRM,
-            .gAMA,
-            .hIST,
-            .pHYs,
-            .sBIT,
-            .tEXt,
-            .tIME,
-            .tRNS,
-            .zTXt,
-            => true,
-
-            _ => false,
-        };
+    pub fn property(self: ChunkType, byte_index: u2) bool {
+        return (self.str()[byte_index] & 32) != 0;
     }
 };
 
@@ -216,31 +185,33 @@ pub const RawChunkBufferStream = struct {
 };
 
 test {
-    std.debug.print("\n", .{});
     const data: []const u8 = comptime data: {
         var data: []const u8 = "";
 
         for ([_][]const u8{
             // signature
             &signature,
+
             // IHDR
             &std.mem.toBytes(std.mem.nativeToBig(u32, 13)) ++ // length
                 std.mem.toBytes(ChunkType.intBig(.IHDR)) ++ // type
                 // data start
                 std.mem.toBytes(std.mem.nativeToBig(u32, 2)) ++ // width
                 std.mem.toBytes(std.mem.nativeToBig(u32, 2)) ++ // height
-                std.mem.toBytes(std.mem.nativeToBig(u8, 8)) ++ // bit depth
-                std.mem.toBytes(std.mem.nativeToBig(u8, 0)) ++ // color type
-                std.mem.toBytes(std.mem.nativeToBig(u8, 0)) ++ // compression method
-                std.mem.toBytes(std.mem.nativeToBig(u8, 0)) ++ // filter method
-                std.mem.toBytes(std.mem.nativeToBig(u8, 0)) ++ // interlace method
-                // data end
-                std.mem.toBytes(std.mem.nativeToBig(u32, 0x57DD52F8)), // crc
+                [_]u8{
+                8, // bit depth
+                0, // color type
+                0, // compression method
+                0, // filter method
+                0, // interlace method
+            } ++ std.mem.toBytes(std.mem.nativeToBig(u32, 0x57DD52F8)), // crc
+
             // IDAT
             &std.mem.toBytes(std.mem.nativeToBig(u32, 17)) ++ // length
                 std.mem.toBytes(ChunkType.intBig(.IDAT)) ++ // type
                 [17]u8{ 8, 29, 1, 6, 0, 249, 255, 0, 255, 0, 0, 0, 255, 6, 0, 1, 255 } ++ // data
                 std.mem.toBytes(std.mem.nativeToBig(u32, 0x68B6702C)), // crc
+
             // IEND
             &std.mem.toBytes(std.mem.nativeToBig(u32, 0)) ++ // length
                 std.mem.toBytes(ChunkType.intBig(.IEND)) ++ // type
@@ -253,40 +224,62 @@ test {
         break :data data;
     };
 
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
 
     var chunk_stream = rawChunkBufferStream(data);
-
     try chunk_stream.start().unwrap();
-    while (chunk_stream.next()) |maybe_chunk| {
-        const chunk: RawChunk = try maybe_chunk.unwrap();
-        const chunk_data = chunk.data();
 
-        std.debug.print(
-            \\type = '{s}'
-            \\crc = 0x{X}
-            \\data = [{d}]u8{any}
-            \\
-            \\
-        , .{
-            @tagName(chunk.header.type),
-            chunk.crc,
-            chunk_data.len,
-            chunk_data,
+    if (chunk_stream.next()) |maybe_chunk| {
+        const chunk = try maybe_chunk.unwrap();
+        try std.testing.expect(chunk.header.type.isValid());
+        try std.testing.expectEqual(chunkType("IHDR"), chunk.header.type);
+        try std.testing.expectEqualSlices(
+            u8,
+            &std.mem.toBytes(std.mem.nativeToBig(u32, 2)) ++
+                std.mem.toBytes(std.mem.nativeToBig(u32, 2)) ++
+                [_]u8{ 8, 0, 0, 0, 0 },
+            chunk.data(),
+        );
+    } else return error.UnexpectedNullChunk;
+
+    if (chunk_stream.next()) |maybe_chunk| {
+        const chunk = try maybe_chunk.unwrap();
+        try std.testing.expect(chunk.header.type.isValid());
+        try std.testing.expectEqual(chunkType("IDAT"), chunk.header.type);
+        try std.testing.expectEqualSlices(
+            u8,
+            &[17]u8{ 8, 29, 1, 6, 0, 249, 255, 0, 255, 0, 0, 0, 255, 6, 0, 1, 255 },
+            chunk.data(),
+        );
+
+        var chunk_data_stream = std.io.fixedBufferStream(chunk.data());
+        var zlib_stream = try std.compress.zlib.zlibStream(arena, chunk_data_stream.reader());
+        defer zlib_stream.deinit();
+
+        const filtered_contents = try zlib_stream.reader().readBytesNoEof(6);
+        try std.testing.expectEqualSlices(
+            u8,
+            &[_]u8{
+                0, 255, 000,
+                0, 000, 255,
+            },
+            &filtered_contents,
+        );
+
+        try std.testing.expectEqual(@as(usize, 0), blk: {
+            var skip_buff: [1]u8 = undefined;
+            break :blk try zlib_stream.reader().readAll(&skip_buff);
         });
+    } else return error.UnexpectedNullChunk;
 
-        if (chunk.header.type == .IDAT and chunk.header.length != 0) {
-            var compressed_content_stream = std.io.fixedBufferStream(chunk_data);
-            var decompress_stream = try std.compress.zlib.zlibStream(arena.allocator(), compressed_content_stream.reader());
-            defer decompress_stream.deinit();
+    if (chunk_stream.next()) |maybe_chunk| {
+        const chunk = try maybe_chunk.unwrap();
+        try std.testing.expect(chunk.header.type.isValid());
+        try std.testing.expectEqual(chunkType("IEND"), chunk.header.type);
+        try std.testing.expectEqualSlices(u8, &[0]u8{}, chunk.data());
+    } else return error.UnexpectedNullChunk;
 
-            const decompressed_data: []const u8 = try decompress_stream.reader().readAllAlloc(arena.allocator(), 8);
-            defer arena.allocator().free(decompressed_data);
-
-            std.debug.print("data(decompressed) = [{d}]u8{any}\n", .{ decompressed_data.len, decompressed_data });
-        }
-
-        std.debug.print("\n", .{});
-    }
+    try std.testing.expectEqual(@as(?RawChunkBufferStream.NextResult, null), chunk_stream.next());
 }
