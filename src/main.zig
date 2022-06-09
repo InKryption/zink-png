@@ -131,10 +131,23 @@ pub const RawChunkBufferStream = struct {
 
     pub const NextResult = union(enum) {
         ok: RawChunk,
-        no_length_bytes: Rcs.NextResult.NoLengthBytes,
-        no_type_bytes: Rcs.NextResult.NoTypeBytes,
-        partial_data_bytes: Rcs.NextResult.PartialDataBytes,
-        no_crc_bytes: Rcs.NextResult.NoCrcBytes,
+        no_type_bytes: NoTypeBytes,
+        partial_data_bytes: PartialDataBytes,
+        no_crc_bytes: NoCrcBytes,
+
+        pub const NoTypeBytes = struct { length: u32 };
+        pub const PartialDataBytes = struct { header: ChunkHeader, bytes: []const u8 };
+        pub const NoCrcBytes = struct { header: ChunkHeader, p_data: [*]const u8 };
+
+        pub const UnwrapError = error{ NoTypeBytes, IncompleteData, NoCrcBytes };
+        pub fn unwrap(self: NextResult) UnwrapError!RawChunk {
+            return switch (self) {
+                .ok => |chunk| chunk,
+                .no_type_bytes => error.NoTypeBytes,
+                .partial_data_bytes => error.IncompleteData,
+                .no_crc_bytes => error.NoCrcBytes,
+            };
+        }
     };
 
     pub fn next(self: *RawChunkBufferStream) ?NextResult {
@@ -168,28 +181,33 @@ pub const RawChunkBufferStream = struct {
                     },
                 };
             },
-            .no_length_bytes => |info| NextResult{ .no_length_bytes = info },
-            .no_type_bytes => |info| NextResult{ .no_type_bytes = info },
+            .no_length_bytes => unreachable,
+            .no_type_bytes => |info| blk: {
+                std.debug.assert(info.err == null);
+                break :blk NextResult{ .no_type_bytes = NextResult.NoTypeBytes{
+                    .length = info.length,
+                } };
+            },
             .out_of_mem_for_data => unreachable,
             .partial_data_bytes_no_capture => |info| blk: {
                 const partial_data_segment = chunk_segment[@sizeOf([2]u32)..];
                 std.debug.assert(info.bytes_len == partial_data_segment.len);
+                std.debug.assert(info.err == null);
 
-                break :blk NextResult{ .partial_data_bytes = Rcs.NextResult.PartialDataBytes{
+                break :blk NextResult{ .partial_data_bytes = NextResult.PartialDataBytes{
                     .header = info.header,
-                    .bytes = partial_data_segment,
-                    .err = info.err,
+                    .bytes = std.mem.span(partial_data_segment),
                 } };
             },
             .partial_data_bytes => unreachable,
             .no_crc_bytes_no_capture => |info| blk: {
                 const data_segment = chunk_segment[@sizeOf([2]u32)..];
                 std.debug.assert(info.header.length == data_segment.len);
+                std.debug.assert(info.err == null);
 
-                break :blk NextResult{ .no_crc_bytes = Rcs.NextResult.NoCrcBytes{
+                break :blk NextResult{ .no_crc_bytes = NextResult.NoCrcBytes{
                     .header = info.header,
-                    .p_data = data_segment.ptr,
-                    .err = info.err,
+                    .p_data = std.mem.span(data_segment).ptr,
                 } };
             },
             .no_crc_bytes => unreachable,
@@ -242,13 +260,7 @@ test {
 
     try chunk_stream.start().unwrap();
     while (chunk_stream.next()) |maybe_chunk| {
-        const chunk: RawChunk = switch (maybe_chunk) {
-            .ok => |ok| ok,
-            .no_length_bytes => |info| return info.err,
-            .no_type_bytes => |info| return info.err orelse @panic("no_type_bytes"),
-            .partial_data_bytes => |info| return info.err orelse @panic("partial_data_bytes"),
-            .no_crc_bytes => |info| return info.err orelse @panic("no_crc_bytes"),
-        };
+        const chunk: RawChunk = try maybe_chunk.unwrap();
         const chunk_data = chunk.data();
 
         std.debug.print(
