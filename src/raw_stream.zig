@@ -41,7 +41,7 @@ pub fn RawChunkStream(comptime ReaderType: type) type {
             };
         }
 
-        /// Must be called once before calling `next`.
+        /// Must be called once before calling `next*`.
         pub fn start(self: *Self) StartResult {
             switch (self.state) {
                 .start => {
@@ -65,6 +65,19 @@ pub fn RawChunkStream(comptime ReaderType: type) type {
                 .end => unreachable,
             }
             return .ok;
+        }
+
+        pub fn nextWithDataSkipBytes(self: *Self, comptime skip_buffer_size: usize) ?NextResult {
+            var skip_buffer: [skip_buffer_size]u8 = undefined;
+            return self.nextWithDataSkipBuffer(&skip_buffer);
+        }
+
+        pub fn nextWithDataSkipBuffer(self: *Self, skip_buffer: []u8) ?NextResult {
+            return self.next(.{ .skip = skip_buffer });
+        }
+
+        pub fn nextAllocData(self: *Self, allocator: std.mem.Allocator) ?NextResult {
+            return self.next(.{ .allocator = allocator });
         }
 
         pub const MaybeAllocator = union(enum) {

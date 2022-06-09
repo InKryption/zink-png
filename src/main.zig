@@ -84,7 +84,7 @@ pub const RawChunkBufferStream = struct {
     const Fbs = std.io.FixedBufferStream([]const u8);
 
     pub fn init(buffer: []const u8) RawChunkBufferStream {
-        return .{
+        return RawChunkBufferStream{
             .raw_stream = Rcs.init(undefined),
             .fbs = Fbs{
                 .buffer = buffer,
@@ -120,16 +120,17 @@ pub const RawChunkBufferStream = struct {
     };
 
     pub fn next(self: *RawChunkBufferStream) ?NextResult {
-        return self.nextWithSkipSize(512);
+        return self.nextWithSkipBytes(512);
     }
 
-    pub fn nextWithSkipSize(self: *RawChunkBufferStream, comptime skip_buffer_bytes: usize) ?NextResult {
-        var skip_buffer: [skip_buffer_bytes]u8 = undefined;
+    pub fn nextWithSkipBytes(self: *RawChunkBufferStream, comptime skip_buffer_size: usize) ?NextResult {
+        var skip_buffer: [skip_buffer_size]u8 = undefined;
         return self.nextWithSkipBuffer(&skip_buffer);
     }
 
     /// Same as `RawChunkStream`, but all returned data pointers refer to the supplied buffer.
-    /// Skip buffer will be used as scratch space to skip over data;
+    /// Skip buffer will be used as scratch space to skip over data.
+    /// Must have called `start` beforehand.
     pub fn nextWithSkipBuffer(self: *RawChunkBufferStream, skip_buffer: []u8) ?NextResult {
         const start_pos = self.fbs.pos;
         const result: Rcs.NextResult = self.raw_stream.next(.{ .skip = skip_buffer }) orelse return null;
