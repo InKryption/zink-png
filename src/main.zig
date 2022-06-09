@@ -256,12 +256,12 @@ test {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var chunk_stream = rawChunkBufferStream(data);
+    comptime var chunk_stream = rawChunkBufferStream(data);
 
-    try chunk_stream.start().unwrap();
-    while (chunk_stream.next()) |maybe_chunk| {
-        const chunk: RawChunk = try maybe_chunk.unwrap();
-        const chunk_data = chunk.data();
+    comptime try chunk_stream.start().unwrap();
+    inline while (comptime chunk_stream.next()) |maybe_chunk| {
+        const chunk: RawChunk = comptime try maybe_chunk.unwrap();
+        const chunk_data = comptime chunk.data();
 
         std.debug.print(
             \\type = '{s}'
@@ -276,8 +276,13 @@ test {
             chunk_data,
         });
 
-        if (chunk.header.type == .IDAT and chunk.header.length != 0) {
-            var compressed_content_stream = std.io.fixedBufferStream(chunk_data);
+        if (comptime chunk.header.type == .IDAT and chunk.header.length != 0) {
+            
+            var compressed_content_stream = comptime std.io.fixedBufferStream(chunk_data);
+            // The issue manifests here, although it originates further back probably;
+            // `chunk_data` as passed seems to start 8 bytes before where it should, causing
+            // the ZlibStream to detect the first byte as being incorrect - this doesn't happen at runtime
+            // where the `chunk_data` slice is correct.
             var decompress_stream = try std.compress.zlib.zlibStream(arena.allocator(), compressed_content_stream.reader());
             defer decompress_stream.deinit();
 
