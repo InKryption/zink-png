@@ -216,7 +216,7 @@ test {
             &std.mem.toBytes(std.mem.nativeToBig(u32, 0)) ++ // length
                 std.mem.toBytes(ChunkType.intBig(.IEND)) ++ // type
                 [0]u8{} ++ // data
-                std.mem.toBytes(std.mem.nativeToBig(u32, 0x68B6702C)), // crc
+                std.mem.toBytes(std.mem.nativeToBig(u32, 0xAE426082)), // crc
         }) |bytes| {
             data = data ++ bytes;
         }
