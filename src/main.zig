@@ -1,30 +1,19 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const raw_chunk_stream = @import("raw_chunk_stream.zig");
 
-pub const RawChunk = raw_chunk_stream.RawChunk;
-pub const RawChunkStream = raw_chunk_stream.RawChunkStream;
-pub const rawChunkStream = raw_chunk_stream.rawChunkStream;
+const util = @import("util.zig");
 
 pub const signature: [8]u8 = .{ 137, 80, 78, 71, 13, 10, 26, 10 };
 
-pub const ChunkHeader = struct {
-    length: u32,
-    type: ChunkType,
-};
-
-pub fn chunkType(bytes: *const [4]u8) ChunkType {
-    return @intToEnum(ChunkType, (std.mem.readIntBig(u32, bytes)));
-}
 pub const ChunkType = enum(u32) {
     pub const Tag = @typeInfo(ChunkType).Enum.tag_type;
-    // Critical Chunk Types
+    // Standard Critical Chunk Types
     IHDR = std.mem.readIntBig(u32, "IHDR"),
     PLTE = std.mem.readIntBig(u32, "PLTE"),
     IDAT = std.mem.readIntBig(u32, "IDAT"),
     IEND = std.mem.readIntBig(u32, "IEND"),
 
-    // Ancillary Chunk Types
+    // Standard Ancillary Chunk Types
     bKGD = std.mem.readIntBig(u32, "bKGD"),
     cHRM = std.mem.readIntBig(u32, "cHRM"),
     gAMA = std.mem.readIntBig(u32, "gAMA"),
@@ -36,20 +25,20 @@ pub const ChunkType = enum(u32) {
     tRNS = std.mem.readIntBig(u32, "tRNS"),
     zTXt = std.mem.readIntBig(u32, "zTXt"),
 
-    // Other Chunk Types
+    // Non-Standard Chunk Types
     _,
+
+    pub fn from(bytes: *const [4]u8) ChunkType {
+        return @intToEnum(ChunkType, (std.mem.readIntBig(u32, bytes)));
+    }
 
     pub fn str(self: ChunkType) [4]u8 {
         return std.mem.toBytes(self.int());
     }
 
     pub fn isValid(self: ChunkType) bool {
-        const bytes = self.str();
-        for (bytes) |byte| {
-            switch (byte) {
-                'A'...'Z', 'a'...'z' => {},
-                else => return false,
-            }
+        for (self.str()) |byte| {
+            if (!std.ascii.isAlpha(byte)) return false;
         }
         return true;
     }
@@ -69,120 +58,216 @@ pub const ChunkType = enum(u32) {
     }
 };
 
-pub fn rawChunkBufferStream(buffer: []const u8) RawChunkBufferStream {
-    return RawChunkBufferStream.init(buffer);
-}
+pub const ChunkHeader = struct {
+    length: u32,
+    type: ChunkType,
 
-/// Wrapper over `RawChunkStream` which uses a buffer, allowing it to take advantage of the fact that it
-/// can rely on the read memory remaining valid even after subsequent read calls to the reader,
-/// avoiding allocations in favor of direct references to aforementioned buffer.
-pub const RawChunkBufferStream = struct {
-    raw_stream: Rcs,
-    fbs: Fbs,
-
-    const Rcs = RawChunkStream(Fbs.Reader);
-    const Fbs = std.io.FixedBufferStream([]const u8);
-
-    pub fn init(buffer: []const u8) RawChunkBufferStream {
-        return RawChunkBufferStream{
-            .raw_stream = Rcs.init(undefined),
-            .fbs = Fbs{
-                .buffer = buffer,
-                .pos = 0,
-            },
+    pub fn parseBuffer(buffer: []const u8) ParseBufferResult {
+        var fbs = std.io.fixedBufferStream(buffer);
+        return switch (ChunkHeader.parseReader(fbs.reader())) {
+            .ok => |value| ParseBufferResult{ .ok = value },
+            .no_type_eos => |info| ParseBufferResult{ .no_type = .{ .length = info.length } },
+            .no_type_err => unreachable,
+            .no_length_eos => ParseBufferResult{ .no_length = .{} },
+            .no_length_err => unreachable,
         };
     }
 
-    pub fn start(self: *RawChunkBufferStream) Rcs.StartResult {
-        self.raw_stream.reader = self.fbs.reader();
-        return self.raw_stream.start();
+    pub const ParseBufferResult = union(enum) {
+        ok: ChunkHeader,
+        no_type: NoType,
+        no_length: NoLength,
+
+        pub const NoType = struct { length: u32 };
+        pub const NoLength = struct {};
+    };
+
+    /// Returns null if the stream ends before returning the required number of bytes for a chunk header.
+    pub fn parseReader(reader: anytype) ParseReaderResult(util.MemoizedErrorSet(@TypeOf(reader).Error)) {
+        const PResult = ParseReaderResult(util.MemoizedErrorSet(@TypeOf(reader).Error));
+
+        const length = util.io.readIntBigOrNull(reader, u32) catch |err| {
+            return PResult{ .no_length_err = .{ .err = err } };
+        } orelse return PResult{ .no_length_eos = .{} };
+
+        const type_value = util.io.readIntBigOrNull(reader, u32) catch |err| {
+            return PResult{ .no_type_err = .{ .err = err, .length = length } };
+        } orelse return PResult{ .no_type_eos = .{ .length = length } };
+
+        return PResult{ .ok = ChunkHeader{
+            .length = length,
+            .type = @intToEnum(ChunkType, type_value),
+        } };
+    }
+
+    const ParseReaderResultTag = enum {
+        /// success
+        ok,
+        /// encountered end of stream while trying to read type
+        no_type_eos,
+        /// encountered error while trying to read type
+        no_type_err,
+        /// encountered end of stream while trying to read length
+        no_length_eos,
+        /// encountered error while trying to read length
+        no_length_err,
+    };
+    pub fn ParseReaderResult(comptime ReaderError: type) type {
+        return union(ParseReaderResultTag) {
+            const Self = @This();
+            ok: ChunkHeader,
+            no_length_err: NoLengthErr,
+            no_length_eos: NoLengthEos,
+            no_type_err: NoTypeErr,
+            no_type_eos: NoTypeEos,
+
+            pub const ReadError = ReaderError;
+            pub const NoLengthErr = struct { err: ReadError };
+            pub const NoLengthEos = struct {};
+            pub const NoTypeErr = struct { length: u32, err: ReadError };
+            pub const NoTypeEos = struct { length: u32 };
+        };
+    }
+};
+
+pub const RawChunk = struct {
+    header: ChunkHeader,
+    p_data: [*]const u8,
+    crc: u32,
+
+    pub fn data(self: RawChunk) []const u8 {
+        return self.p_data[0..self.header.length];
+    }
+
+    pub fn deinit(self: RawChunk, allocator: std.mem.Allocator) void {
+        allocator.free(self.data());
+    }
+};
+
+pub const RawChunkStreamMemory = struct {
+    src: []const u8,
+    state: State,
+    index: usize,
+
+    pub fn init(buffer: []const u8) RawChunkStreamMemory {
+        return RawChunkStreamMemory{
+            .src = buffer,
+            .state = .begin,
+            .index = 0,
+        };
+    }
+
+    pub const StartError = error{ NoPngSignature, BadPngSignature };
+    pub fn start(self: *RawChunkStreamMemory) StartError!void {
+        switch (self.state) {
+            .begin => {
+                errdefer self.state = .end;
+
+                std.debug.assert(self.index == 0);
+                self.index += signature.len;
+
+                if (self.src.len < self.index) {
+                    return error.NoPngSignature;
+                }
+                if (!std.mem.eql(u8, self.src[0..self.index], &signature)) {
+                    return error.BadPngSignature;
+                }
+
+                self.state = .in_progress;
+            },
+            .in_progress => unreachable,
+            .end => unreachable,
+        }
     }
 
     pub const NextResult = union(enum) {
         ok: RawChunk,
-        no_type_bytes: NoTypeBytes,
-        partial_data_bytes: PartialDataBytes,
-        no_crc_bytes: NoCrcBytes,
+        no_crc: NoCrc,
+        partial_data: PartialData,
+        no_type: NoType,
+        no_length: NoLength,
 
-        pub const NoTypeBytes = struct { length: u32 };
-        pub const PartialDataBytes = struct { header: ChunkHeader, bytes: []const u8 };
-        pub const NoCrcBytes = struct { header: ChunkHeader, p_data: [*]const u8 };
-
-        pub const UnwrapError = error{ NoTypeBytes, IncompleteData, NoCrcBytes };
+        pub const UnwrapError = error{ NoCrc, PartialData, NoType, NoLength };
         pub fn unwrap(self: NextResult) UnwrapError!RawChunk {
             return switch (self) {
-                .ok => |chunk| chunk,
-                .no_type_bytes => error.NoTypeBytes,
-                .partial_data_bytes => error.IncompleteData,
-                .no_crc_bytes => error.NoCrcBytes,
+                .ok => |value| value,
+                .no_crc => error.NoCrc,
+                .partial_data => error.PartialData,
+                .no_type => error.NoType,
+                .no_length => error.NoLength,
             };
         }
+
+        pub const NoCrc = struct { header: ChunkHeader, p_data: [*]const u8 };
+        pub const PartialData = struct { header: ChunkHeader, partial_data: []const u8 };
+        pub const NoType = struct { length: u32 };
+        pub const NoLength = struct {};
     };
+    pub fn next(self: *RawChunkStreamMemory) ?NextResult {
+        switch (self.state) {
+            .begin => unreachable,
+            .in_progress => {},
+            .end => return null,
+        }
 
-    pub fn next(self: *RawChunkBufferStream) ?NextResult {
-        return self.nextWithSkipBytes(512);
-    }
+        self.state = .end;
+        if (self.index == self.src.len) {
+            return null;
+        }
 
-    pub fn nextWithSkipBytes(self: *RawChunkBufferStream, comptime skip_buffer_size: usize) ?NextResult {
-        var skip_buffer: [skip_buffer_size]u8 = undefined;
-        return self.nextWithSkipBuffer(&skip_buffer);
-    }
-
-    /// Same as `RawChunkStream`, but all returned data pointers refer to the supplied buffer.
-    /// Skip buffer will be used as scratch space to skip over data.
-    /// Must have called `start` beforehand.
-    pub fn nextWithSkipBuffer(self: *RawChunkBufferStream, skip_buffer: []u8) ?NextResult {
-        const start_pos = self.fbs.pos;
-        const result: Rcs.NextResult = self.raw_stream.next(.{ .skip = skip_buffer }) orelse return null;
-        const end_pos = self.fbs.pos;
-
-        const chunk_segment = self.fbs.buffer[start_pos..end_pos];
-
-        return switch (result) {
-            .ok => |info| blk: {
-                const data_segment = chunk_segment[@sizeOf([2]u32) .. chunk_segment.len - @sizeOf(u32)];
-                std.debug.assert(info.header.length == data_segment.len);
-
-                break :blk NextResult{
-                    .ok = RawChunk{
-                        .header = info.header,
-                        .p_data = std.mem.span(data_segment).ptr,
-                        .crc = info.crc,
-                    },
-                };
-            },
-            .no_length_bytes => unreachable,
-            .no_type_bytes => |info| blk: {
-                std.debug.assert(info.err == null);
-                break :blk NextResult{ .no_type_bytes = NextResult.NoTypeBytes{
-                    .length = info.length,
-                } };
-            },
-            .out_of_mem_for_data => unreachable,
-            .partial_data_bytes_no_capture => |info| blk: {
-                const partial_data_segment = chunk_segment[@sizeOf([2]u32)..];
-                std.debug.assert(info.bytes_len == partial_data_segment.len);
-                std.debug.assert(info.err == null);
-
-                break :blk NextResult{ .partial_data_bytes = NextResult.PartialDataBytes{
-                    .header = info.header,
-                    .bytes = std.mem.span(partial_data_segment),
-                } };
-            },
-            .partial_data_bytes => unreachable,
-            .no_crc_bytes_no_capture => |info| blk: {
-                const data_segment = chunk_segment[@sizeOf([2]u32)..];
-                std.debug.assert(info.header.length == data_segment.len);
-                std.debug.assert(info.err == null);
-
-                break :blk NextResult{ .no_crc_bytes = NextResult.NoCrcBytes{
-                    .header = info.header,
-                    .p_data = std.mem.span(data_segment).ptr,
-                } };
-            },
-            .no_crc_bytes => unreachable,
+        const header: ChunkHeader = switch (ChunkHeader.parseBuffer(self.src[self.index..])) {
+            .ok => |value| value,
+            .no_type => |info| return NextResult{ .no_type = .{ .length = info.length } },
+            .no_length => return NextResult{ .no_length = .{} },
         };
+        self.index += @sizeOf([2]u32);
+
+        const data: []const u8 = data: {
+            const data_start = self.index;
+            self.index += header.length;
+
+            if (self.src.len < self.index) {
+                return NextResult{ .partial_data = NextResult.PartialData{
+                    .header = header,
+                    .partial_data = self.src[data_start..],
+                } };
+            }
+
+            const data = self.src[data_start..self.index];
+            std.debug.assert(data.len == header.length);
+
+            break :data data;
+        };
+
+        const crc: u32 = crc: {
+            const crc_start = self.index;
+            self.index += @sizeOf(u32);
+
+            if (self.src.len < self.index) {
+                return NextResult{ .no_crc = NextResult.NoCrc{
+                    .header = header,
+                    .p_data = data.ptr,
+                } };
+            }
+
+            const crc = std.mem.readIntBig(u32, self.src[crc_start..][0..@sizeOf(u32)]);
+            break :crc crc;
+        };
+
+        self.state = .in_progress;
+
+        return NextResult{ .ok = RawChunk{
+            .header = header,
+            .p_data = data.ptr,
+            .crc = crc,
+        } };
     }
+
+    const State = enum {
+        begin,
+        in_progress,
+        end,
+    };
 };
 
 test {
@@ -225,20 +310,15 @@ test {
         break :data data;
     };
 
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
+    var rcsm = RawChunkStreamMemory.init(data);
 
-    var chunk_stream = rawChunkBufferStream(data);
-    try chunk_stream.start().unwrap();
-
-    if (chunk_stream.next()) |maybe_chunk| {
+    try rcsm.start();
+    if (rcsm.next()) |maybe_chunk| {
         const chunk = try maybe_chunk.unwrap();
 
         try std.testing.expect(chunk.header.type.isValid());
-        try std.testing.expectEqual(chunkType("IHDR"), chunk.header.type);
-        try std.testing.expectEqualSlices(
-            u8,
+        try std.testing.expectEqual(ChunkType.from("IHDR"), chunk.header.type);
+        try std.testing.expectEqualStrings(
             &std.mem.toBytes(std.mem.nativeToBig(u32, 2)) ++
                 std.mem.toBytes(std.mem.nativeToBig(u32, 2)) ++
                 [_]u8{ 8, 0, 0, 0, 0 },
@@ -251,10 +331,10 @@ test {
         try std.testing.expectEqual(crc_hasher.final(), chunk.crc);
     } else return error.UnexpectedNullChunk;
 
-    if (chunk_stream.next()) |maybe_chunk| {
+    if (rcsm.next()) |maybe_chunk| {
         const chunk = try maybe_chunk.unwrap();
         try std.testing.expect(chunk.header.type.isValid());
-        try std.testing.expectEqual(chunkType("IDAT"), chunk.header.type);
+        try std.testing.expectEqual(ChunkType.from("IDAT"), chunk.header.type);
         try std.testing.expectEqualSlices(
             u8,
             &[17]u8{ 8, 29, 1, 6, 0, 249, 255, 0, 255, 0, 0, 0, 255, 6, 0, 1, 255 },
@@ -267,7 +347,7 @@ test {
         try std.testing.expectEqual(crc_hasher.final(), chunk.crc);
 
         var chunk_data_stream = std.io.fixedBufferStream(chunk.data());
-        var zlib_stream = try std.compress.zlib.zlibStream(arena, chunk_data_stream.reader());
+        var zlib_stream = try std.compress.zlib.zlibStream(std.testing.allocator, chunk_data_stream.reader());
         defer zlib_stream.deinit();
 
         const filtered_contents = try zlib_stream.reader().readBytesNoEof(6);
@@ -286,10 +366,10 @@ test {
         });
     } else return error.UnexpectedNullChunk;
 
-    if (chunk_stream.next()) |maybe_chunk| {
+    if (rcsm.next()) |maybe_chunk| {
         const chunk = try maybe_chunk.unwrap();
         try std.testing.expect(chunk.header.type.isValid());
-        try std.testing.expectEqual(chunkType("IEND"), chunk.header.type);
+        try std.testing.expectEqual(ChunkType.from("IEND"), chunk.header.type);
         try std.testing.expectEqualSlices(u8, &[0]u8{}, chunk.data());
 
         var crc_hasher = std.hash.Crc32.init();
@@ -298,5 +378,5 @@ test {
         try std.testing.expectEqual(crc_hasher.final(), chunk.crc);
     } else return error.UnexpectedNullChunk;
 
-    try std.testing.expectEqual(@as(?RawChunkBufferStream.NextResult, null), chunk_stream.next());
+    try std.testing.expectEqual(@as(?RawChunkStreamMemory.NextResult, null), rcsm.next());
 }
