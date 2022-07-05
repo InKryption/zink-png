@@ -62,14 +62,10 @@ pub const ChunkHeader = struct {
     length: u32,
     type: ChunkType,
 
-    pub fn parseBuffer(buffer: []const u8) ParseBufferResult {
-        var fbs = std.io.fixedBufferStream(buffer);
-        return switch (ChunkHeader.parseReader(fbs.reader())) {
-            .ok => |value| ParseBufferResult{ .ok = value },
-            .no_type_eos => |info| ParseBufferResult{ .no_type = .{ .length = info.length } },
-            .no_type_err => unreachable,
-            .no_length_eos => ParseBufferResult{ .no_length = .{} },
-            .no_length_err => unreachable,
+    pub fn parseBytes(bytes: *const [@sizeOf(u32) * 2]u8) ChunkHeader {
+        return switch (ChunkHeader.parseBuffer(bytes)) {
+            .ok => |value| value,
+            else => unreachable,
         };
     }
 
@@ -82,9 +78,42 @@ pub const ChunkHeader = struct {
         pub const NoLength = struct {};
     };
 
+    pub fn parseBuffer(buffer: []const u8) ParseBufferResult {
+        var fbs = std.io.fixedBufferStream(buffer);
+        return switch (ChunkHeader.parseReader(fbs.reader())) {
+            .ok => |value| ParseBufferResult{ .ok = value },
+            .no_type_eos => |info| ParseBufferResult{ .no_type = .{ .length = info.length } },
+            .no_type_err => unreachable,
+            .no_length_eos => ParseBufferResult{ .no_length = .{} },
+            .no_length_err => unreachable,
+        };
+    }
+
+    pub fn ParseReaderResult(comptime ReaderError: type) type {
+        return union(enum) {
+            const Self = @This();
+            /// success
+            ok: ChunkHeader,
+            /// encountered end of stream while trying to read type
+            no_type_eos: NoTypeEos,
+            /// encountered error while trying to read type
+            no_type_err: NoTypeErr,
+            /// encountered end of stream while trying to read length
+            no_length_eos: NoLengthEos,
+            /// encountered error while trying to read length
+            no_length_err: NoLengthErr,
+
+            pub const ReadError = ReaderError;
+            pub const NoTypeEos = struct { length: u32 };
+            pub const NoTypeErr = struct { length: u32, err: ReadError };
+            pub const NoLengthEos = struct {};
+            pub const NoLengthErr = struct { err: ReadError };
+        };
+    }
+
     /// Returns null if the stream ends before returning the required number of bytes for a chunk header.
-    pub fn parseReader(reader: anytype) ParseReaderResult(util.MemoizedErrorSet(@TypeOf(reader).Error)) {
-        const PResult = ParseReaderResult(util.MemoizedErrorSet(@TypeOf(reader).Error));
+    pub fn parseReader(reader: anytype) ParseReaderResult(util.NormalizedErrorSet(@TypeOf(reader).Error)) {
+        const PResult = ParseReaderResult(util.NormalizedErrorSet(@TypeOf(reader).Error));
 
         const length = util.io.readIntBigOrNull(reader, u32) catch |err| {
             return PResult{ .no_length_err = .{ .err = err } };
@@ -99,284 +128,119 @@ pub const ChunkHeader = struct {
             .type = @intToEnum(ChunkType, type_value),
         } };
     }
-
-    const ParseReaderResultTag = enum {
-        /// success
-        ok,
-        /// encountered end of stream while trying to read type
-        no_type_eos,
-        /// encountered error while trying to read type
-        no_type_err,
-        /// encountered end of stream while trying to read length
-        no_length_eos,
-        /// encountered error while trying to read length
-        no_length_err,
-    };
-    pub fn ParseReaderResult(comptime ReaderError: type) type {
-        return union(ParseReaderResultTag) {
-            const Self = @This();
-            ok: ChunkHeader,
-            no_length_err: NoLengthErr,
-            no_length_eos: NoLengthEos,
-            no_type_err: NoTypeErr,
-            no_type_eos: NoTypeEos,
-
-            pub const ReadError = ReaderError;
-            pub const NoLengthErr = struct { err: ReadError };
-            pub const NoLengthEos = struct {};
-            pub const NoTypeErr = struct { length: u32, err: ReadError };
-            pub const NoTypeEos = struct { length: u32 };
-        };
-    }
 };
 
-pub const RawChunk = struct {
-    header: ChunkHeader,
-    p_data: [*]const u8,
-    crc: u32,
+pub fn rawChunkStream(reader: anytype) RawChunkStream(@TypeOf(reader)) {
+    return RawChunkStream(@TypeOf(reader)).init(reader);
+}
+pub fn RawChunkStream(comptime Reader: type) type {
+    return struct {
+        const Self = @This();
+        reader: Reader,
+        state: State,
 
-    pub fn data(self: RawChunk) []const u8 {
-        return self.p_data[0..self.header.length];
-    }
-
-    pub fn deinit(self: RawChunk, allocator: std.mem.Allocator) void {
-        allocator.free(self.data());
-    }
-};
-
-pub const RawChunkStreamMemory = struct {
-    src: []const u8,
-    state: State,
-    index: usize,
-
-    pub fn init(buffer: []const u8) RawChunkStreamMemory {
-        return RawChunkStreamMemory{
-            .src = buffer,
-            .state = .begin,
-            .index = 0,
-        };
-    }
-
-    pub const StartError = error{ NoPngSignature, BadPngSignature };
-    pub fn start(self: *RawChunkStreamMemory) StartError!void {
-        switch (self.state) {
-            .begin => {
-                errdefer self.state = .end;
-
-                std.debug.assert(self.index == 0);
-                self.index += signature.len;
-
-                if (self.src.len < self.index) {
-                    return error.NoPngSignature;
-                }
-                if (!std.mem.eql(u8, self.src[0..self.index], &signature)) {
-                    return error.BadPngSignature;
-                }
-
-                self.state = .in_progress;
-            },
-            .in_progress => unreachable,
-            .end => unreachable,
-        }
-    }
-
-    pub const NextResult = union(enum) {
-        ok: RawChunk,
-        no_crc: NoCrc,
-        partial_data: PartialData,
-        no_type: NoType,
-        no_length: NoLength,
-
-        pub const UnwrapError = error{ NoCrc, PartialData, NoType, NoLength };
-        pub fn unwrap(self: NextResult) UnwrapError!RawChunk {
-            return switch (self) {
-                .ok => |value| value,
-                .no_crc => error.NoCrc,
-                .partial_data => error.PartialData,
-                .no_type => error.NoType,
-                .no_length => error.NoLength,
+        pub fn init(reader: Reader) Self {
+            return Self{
+                .reader = reader,
+                .state = .begin,
             };
         }
 
-        pub const NoCrc = struct { header: ChunkHeader, p_data: [*]const u8 };
-        pub const PartialData = struct { header: ChunkHeader, partial_data: []const u8 };
-        pub const NoType = struct { length: u32 };
-        pub const NoLength = struct {};
-    };
-    pub fn next(self: *RawChunkStreamMemory) ?NextResult {
-        switch (self.state) {
-            .begin => unreachable,
-            .in_progress => {},
-            .end => return null,
-        }
-
-        self.state = .end;
-        if (self.index == self.src.len) {
-            return null;
-        }
-
-        const header: ChunkHeader = switch (ChunkHeader.parseBuffer(self.src[self.index..])) {
-            .ok => |value| value,
-            .no_type => |info| return NextResult{ .no_type = .{ .length = info.length } },
-            .no_length => return NextResult{ .no_length = .{} },
-        };
-        self.index += @sizeOf([2]u32);
-
-        const data: []const u8 = data: {
-            const data_start = self.index;
-            self.index += header.length;
-
-            if (self.src.len < self.index) {
-                return NextResult{ .partial_data = NextResult.PartialData{
-                    .header = header,
-                    .partial_data = self.src[data_start..],
-                } };
+        pub const StartError = error{ NoBytes, IncompleteSignature, InvalidSignature };
+        pub fn start(self: *Self) Reader.Error!StartError!void {
+            switch (self.state) {
+                .begin => {},
+                .awaiting_header => unreachable,
+                .awaiting_data => unreachable,
+                .end => unreachable,
             }
 
-            const data = self.src[data_start..self.index];
-            std.debug.assert(data.len == header.length);
+            const Result = StartError!void;
+            errdefer self.state = .end;
 
-            break :data data;
-        };
+            const start_bytes = try util.io.readBoundedArray(self.reader, signature.len);
 
-        const crc: u32 = crc: {
-            const crc_start = self.index;
-            self.index += @sizeOf(u32);
+            if (start_bytes.len == 0) return util.as(Result, error.NoBytes);
+            if (start_bytes.len < signature.len) return util.as(Result, error.IncompleteSignature);
 
-            if (self.src.len < self.index) {
-                return NextResult{ .no_crc = NextResult.NoCrc{
-                    .header = header,
-                    .p_data = data.ptr,
-                } };
+            std.debug.assert(start_bytes.len == signature.len);
+            if (!std.mem.eql(u8, start_bytes.constSlice(), signature[0..])) {
+                return util.as(Result, error.InvalidSignature);
             }
 
-            const crc = std.mem.readIntBig(u32, self.src[crc_start..][0..@sizeOf(u32)]);
-            break :crc crc;
-        };
-
-        self.state = .in_progress;
-
-        return NextResult{ .ok = RawChunk{
-            .header = header,
-            .p_data = data.ptr,
-            .crc = crc,
-        } };
-    }
-
-    const State = enum {
-        begin,
-        in_progress,
-        end,
-    };
-};
-
-test {
-    const data: []const u8 = comptime data: {
-        var data: []const u8 = "";
-
-        for ([_][]const u8{
-            // signature
-            &signature,
-
-            // IHDR
-            &std.mem.toBytes(std.mem.nativeToBig(u32, 13)) ++ // length
-                std.mem.toBytes(ChunkType.intBig(.IHDR)) ++ // type
-                // data start
-                std.mem.toBytes(std.mem.nativeToBig(u32, 2)) ++ // width
-                std.mem.toBytes(std.mem.nativeToBig(u32, 2)) ++ // height
-                [_]u8{
-                8, // bit depth
-                0, // color type
-                0, // compression method
-                0, // filter method
-                0, // interlace method
-            } ++ std.mem.toBytes(std.mem.nativeToBig(u32, 0x57DD52F8)), // crc
-
-            // IDAT
-            &std.mem.toBytes(std.mem.nativeToBig(u32, 17)) ++ // length
-                std.mem.toBytes(ChunkType.intBig(.IDAT)) ++ // type
-                [17]u8{ 8, 29, 1, 6, 0, 249, 255, 0, 255, 0, 0, 0, 255, 6, 0, 1, 255 } ++ // data
-                std.mem.toBytes(std.mem.nativeToBig(u32, 0x68B6702C)), // crc
-
-            // IEND
-            &std.mem.toBytes(std.mem.nativeToBig(u32, 0)) ++ // length
-                std.mem.toBytes(ChunkType.intBig(.IEND)) ++ // type
-                [0]u8{} ++ // data
-                std.mem.toBytes(std.mem.nativeToBig(u32, 0xAE426082)), // crc
-        }) |bytes| {
-            data = data ++ bytes;
+            self.state = .awaiting_header;
         }
 
-        break :data data;
+        const GetHeaderResult = ChunkHeader.ParseReaderResult(util.NormalizedErrorSet(Reader.Error));
+        pub fn getHeader(self: *Self) ?GetHeaderResult {
+            switch (self.state) {
+                .begin => unreachable,
+                .awaiting_header => {},
+                .awaiting_data => unreachable,
+                .end => return null,
+            }
+
+            const result = ChunkHeader.parseReader(self.reader);
+            self.state = switch (result) {
+                .ok => |header| State{ .awaiting_data = .{
+                    .header = header,
+                } },
+                else => .end,
+            };
+
+            return result;
+        }
+
+        pub fn getDataAndCrc(self: *Self, writer: anytype) !u32 {
+            const ctx: *State.AwaitingData = switch (self.state) {
+                .begin => unreachable,
+                .awaiting_header => unreachable,
+                .awaiting_data => |*ctx| ctx,
+                .end => unreachable,
+            };
+            
+            std.debug.assert(ctx.bytes_read < ctx.header.length);
+            
+        }
+
+        const State = union(enum) {
+            begin,
+            awaiting_header,
+            awaiting_data: AwaitingData,
+            end,
+
+            const AwaitingData = struct {
+                header: ChunkHeader,
+                bytes_read: u32 = 0,
+            };
+        };
     };
+}
 
-    var rcsm = RawChunkStreamMemory.init(data);
+test "RawChunkStream.start + FixedBufferStream" {
+    var fbs: std.io.FixedBufferStream([]const u8) = undefined;
+    var rcs: RawChunkStream(@TypeOf(fbs).Reader) = undefined;
 
-    try rcsm.start();
-    if (rcsm.next()) |maybe_chunk| {
-        const chunk = try maybe_chunk.unwrap();
+    fbs = std.io.fixedBufferStream(&[_]u8{});
+    rcs = rawChunkStream(fbs.reader());
+    try std.testing.expectError(error.NoBytes, rcs.start() catch |err| switch (err) {});
 
-        try std.testing.expect(chunk.header.type.isValid());
-        try std.testing.expectEqual(ChunkType.from("IHDR"), chunk.header.type);
-        try std.testing.expectEqualStrings(
-            &std.mem.toBytes(std.mem.nativeToBig(u32, 2)) ++
-                std.mem.toBytes(std.mem.nativeToBig(u32, 2)) ++
-                [_]u8{ 8, 0, 0, 0, 0 },
-            chunk.data(),
-        );
+    fbs = std.io.fixedBufferStream(signature[0 .. signature.len - 1]);
+    rcs = rawChunkStream(fbs.reader());
+    try std.testing.expectError(error.IncompleteSignature, rcs.start() catch |err| switch (err) {});
 
-        var crc_hasher = std.hash.Crc32.init();
-        crc_hasher.update(&std.mem.toBytes(chunk.header.type.intBig()));
-        crc_hasher.update(chunk.data());
-        try std.testing.expectEqual(crc_hasher.final(), chunk.crc);
-    } else return error.UnexpectedNullChunk;
+    fbs = std.io.fixedBufferStream(signature[0 .. signature.len - 1] ++ [_]u8{signature[signature.len - 1] +% 1});
+    rcs = rawChunkStream(fbs.reader());
+    try std.testing.expectError(error.InvalidSignature, rcs.start() catch |err| switch (err) {});
+}
 
-    if (rcsm.next()) |maybe_chunk| {
-        const chunk = try maybe_chunk.unwrap();
-        try std.testing.expect(chunk.header.type.isValid());
-        try std.testing.expectEqual(ChunkType.from("IDAT"), chunk.header.type);
-        try std.testing.expectEqualSlices(
-            u8,
-            &[17]u8{ 8, 29, 1, 6, 0, 249, 255, 0, 255, 0, 0, 0, 255, 6, 0, 1, 255 },
-            chunk.data(),
-        );
+test "RawChunkStream .start+ fallible reader" {
+    var fbs: std.io.FixedBufferStream([]const u8) = undefined;
+    var elr: util.io.ErrorLimitedReader(@TypeOf(fbs).Reader) = undefined;
+    var rcs: RawChunkStream(@TypeOf(elr).Reader) = undefined;
 
-        var crc_hasher = std.hash.Crc32.init();
-        crc_hasher.update(&std.mem.toBytes(chunk.header.type.intBig()));
-        crc_hasher.update(chunk.data());
-        try std.testing.expectEqual(crc_hasher.final(), chunk.crc);
-
-        var chunk_data_stream = std.io.fixedBufferStream(chunk.data());
-        var zlib_stream = try std.compress.zlib.zlibStream(std.testing.allocator, chunk_data_stream.reader());
-        defer zlib_stream.deinit();
-
-        const filtered_contents = try zlib_stream.reader().readBytesNoEof(6);
-        try std.testing.expectEqualSlices(
-            u8,
-            &[_]u8{
-                0, 255, 000,
-                0, 000, 255,
-            },
-            &filtered_contents,
-        );
-
-        try std.testing.expectEqual(@as(usize, 0), blk: {
-            var skip_buff: [1]u8 = undefined;
-            break :blk try zlib_stream.reader().readAll(&skip_buff);
-        });
-    } else return error.UnexpectedNullChunk;
-
-    if (rcsm.next()) |maybe_chunk| {
-        const chunk = try maybe_chunk.unwrap();
-        try std.testing.expect(chunk.header.type.isValid());
-        try std.testing.expectEqual(ChunkType.from("IEND"), chunk.header.type);
-        try std.testing.expectEqualSlices(u8, &[0]u8{}, chunk.data());
-
-        var crc_hasher = std.hash.Crc32.init();
-        crc_hasher.update(&std.mem.toBytes(chunk.header.type.intBig()));
-        crc_hasher.update(chunk.data());
-        try std.testing.expectEqual(crc_hasher.final(), chunk.crc);
-    } else return error.UnexpectedNullChunk;
-
-    try std.testing.expectEqual(@as(?RawChunkStreamMemory.NextResult, null), rcsm.next());
+    fbs = std.io.fixedBufferStream(signature[0..]);
+    elr = util.io.errorLimitedReader(fbs.reader(), signature.len - 1);
+    rcs = rawChunkStream(elr.reader());
+    try std.testing.expectError(error.AttemptedToReadMoreThanLimit, rcs.start());
 }

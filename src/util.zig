@@ -5,7 +5,7 @@ pub fn ErrorSetFromValue(comptime value: anyerror) type {
     return @Type(.{ .ErrorSet = &set });
 }
 
-pub fn MemoizedErrorSet(comptime ErrorSet: type) type {
+pub fn NormalizedErrorSet(comptime ErrorSet: type) type {
     const info: []const std.builtin.Type.Error = @typeInfo(ErrorSet).ErrorSet orelse return anyerror;
     var values: [info.len]anyerror = .{undefined} ** info.len;
     for (values) |*val, i| val.* = @field(anyerror, info[i].name);
@@ -15,10 +15,10 @@ pub fn MemoizedErrorSet(comptime ErrorSet: type) type {
             return std.mem.lessThan(u8, @errorName(lhs), @errorName(rhs));
         }
     }.lessThan);
-    return MemoizedErrorSetImpl(values.len, values);
+    return NormalizedErrorSetImpl(values.len, values);
 }
 
-inline fn MemoizedErrorSetImpl(
+inline fn NormalizedErrorSetImpl(
     comptime error_value_count: comptime_int,
     comptime error_values: [error_value_count]anyerror,
 ) type {
@@ -29,47 +29,67 @@ inline fn MemoizedErrorSetImpl(
     return ErrorSet;
 }
 
-pub const io = struct {
-    pub fn ReadAllResult(comptime ErrorSet: type) type {
-        return ReadAllResultImpl(MemoizedErrorSet(ErrorSet));
-    }
-    fn ReadAllResultImpl(comptime ErrorSet: type) type {
-        return struct {
-            bytes_read: usize,
-            err: if (@sizeOf(Err) == 0) Err else ?Err,
+pub fn as(comptime T: type, value: anytype) T {
+    return value;
+}
 
-            pub inline fn getError(self: @This()) ?Err {
-                comptime if (@sizeOf(Err) == 0) return null;
-                return self.err;
+pub const io = struct {
+    pub fn errorLimitedReader(inner: anytype, limit: u64) ErrorLimitedReader(@TypeOf(inner)) {
+        return ErrorLimitedReader(@TypeOf(inner)).init(inner, limit);
+    }
+    pub fn ErrorLimitedReader(comptime InnerReader: type) type {
+        return struct {
+            const Self = @This();
+            inner: std.io.CountingReader(InnerReader),
+            limit: u64,
+
+            pub fn init(inner: InnerReader, limit: u64) Self {
+                return Self{
+                    .inner = std.io.countingReader(inner),
+                    .limit = limit,
+                };
             }
 
-            pub const Err = ErrorSet;
-            pub fn unwrap(self: @This()) Err!usize {
-                return self.getError() orelse self.bytes_read;
+            pub const ReadError = error{AttemptedToReadMoreThanLimit} || InnerReader.Error;
+            pub const Reader = std.io.Reader(*Self, ReadError, Self.read);
+            pub fn reader(self: *Self) Self.Reader {
+                return .{ .context = self };
+            }
+
+            fn read(self: *Self, buffer: []u8) ReadError!usize {
+                if (buffer.len != 0 and self.inner.bytes_read == self.limit) {
+                    return error.AttemptedToReadMoreThanLimit;
+                }
+                const remaining_bytes = self.limit - self.inner.bytes_read;
+                return self.inner.reader().read(buffer[0..std.math.min(remaining_bytes, buffer.len)]);
             }
         };
     }
-    /// Returns the number of bytes read + the error, if any. If the number read is smaller than `buffer.len`, it
-    /// means the stream reached the end. Reaching the end of a stream is not an error
-    /// condition.
-    /// If an error did occur, the number of bytes read will be less than `buffer.len`.
-    pub fn readAll(reader: anytype, buffer: []u8) ReadAllResult(@TypeOf(reader).Error) {
-        const Result = ReadAllResult(@TypeOf(reader).Error);
 
-        var index: usize = 0;
-        while (index != buffer.len) {
-            const amt = reader.read(buffer[index..]) catch |err|
-                return Result{ .bytes_read = index, .err = err };
-            if (amt == 0) break;
-            index += amt;
+    pub fn readIntoBoundedArray(
+        reader: anytype,
+        /// Must be `std.BoundedArray(u8, n)`.
+        bounded_array: anytype,
+    ) @TypeOf(reader).Error!void {
+        if (*std.BoundedArray(u8, bounded_array.buffer.len) != @TypeOf(bounded_array)) {
+            @compileError("Expected `*std.BoundedArray(u8, n)`, got `" ++ @typeName(bounded_array) ++ "`.");
         }
 
-        return Result{ .bytes_read = index, .err = null };
+        while (bounded_array.len != bounded_array.buffer.len) {
+            const amt = try reader.read(bounded_array.unusedCapacitySlice());
+            if (amt == 0) break;
+            bounded_array.resize(bounded_array.len + amt) catch unreachable;
+        }
+    }
+    pub fn readBoundedArray(reader: anytype, comptime max_bytes: usize) @TypeOf(reader).Error!std.BoundedArray(u8, max_bytes) {
+        var result = std.BoundedArray(u8, max_bytes){};
+        try readIntoBoundedArray(reader, &result);
+        return result;
     }
 
     pub fn readBytesNoEof(reader: anytype, comptime num_bytes: usize) @TypeOf(reader).Error!?[num_bytes]u8 {
         var buffer: [num_bytes]u8 = undefined;
-        const bytes_read = try readAll(reader, &buffer).unwrap();
+        const bytes_read = try reader.readAll(buffer[0..]);
         return if (bytes_read < buffer.len) null else buffer;
     }
 
