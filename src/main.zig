@@ -59,7 +59,7 @@ pub const ChunkType = enum(u32) {
 };
 
 pub const ChunkHeader = struct {
-    length: u32,
+    length: u31,
     type: ChunkType,
 
     pub fn parseBytes(bytes: *const [@sizeOf(u32) * 2]u8) ChunkHeader {
@@ -91,21 +91,23 @@ pub const ChunkHeader = struct {
 
     pub fn ParseReaderResult(comptime ReaderError: type) type {
         return union(enum) {
-            const Self = @This();
             /// success
             ok: ChunkHeader,
             /// encountered end of stream while trying to read type
             no_type_eos: NoTypeEos,
             /// encountered error while trying to read type
             no_type_err: NoTypeErr,
+            /// encountered an invalid length
+            invalid_length: InvalidLength,
             /// encountered end of stream while trying to read length
             no_length_eos: NoLengthEos,
             /// encountered error while trying to read length
             no_length_err: NoLengthErr,
 
             pub const ReadError = ReaderError;
-            pub const NoTypeEos = struct { length: u32 };
-            pub const NoTypeErr = struct { length: u32, err: ReadError };
+            pub const NoTypeEos = struct { length: u31 };
+            pub const NoTypeErr = struct { length: u31, err: ReadError };
+            pub const InvalidLength = struct { length: u32 };
             pub const NoLengthEos = struct {};
             pub const NoLengthErr = struct { err: ReadError };
         };
@@ -115,9 +117,13 @@ pub const ChunkHeader = struct {
     pub fn parseReader(reader: anytype) ParseReaderResult(util.NormalizedErrorSet(@TypeOf(reader).Error)) {
         const PResult = ParseReaderResult(util.NormalizedErrorSet(@TypeOf(reader).Error));
 
-        const length = util.io.readIntBigOrNull(reader, u32) catch |err| {
+        const length = if (util.io.readIntBigOrNull(reader, u32)) |maybe_length| length: {
+            const length = maybe_length orelse return PResult{ .no_length_eos = .{} };
+            break :length std.math.cast(u31, length) orelse
+                return PResult{ .invalid_length = .{ .length = length } };
+        } else |err| {
             return PResult{ .no_length_err = .{ .err = err } };
-        } orelse return PResult{ .no_length_eos = .{} };
+        };
 
         const type_value = util.io.readIntBigOrNull(reader, u32) catch |err| {
             return PResult{ .no_type_err = .{ .err = err, .length = length } };
@@ -171,7 +177,24 @@ pub fn RawChunkStream(comptime Reader: type) type {
             self.state = .awaiting_header;
         }
 
-        const GetHeaderResult = ChunkHeader.ParseReaderResult(util.NormalizedErrorSet(Reader.Error));
+        const GetHeaderResult = union(enum) {
+            /// success
+            ok: ChunkHeader,
+            /// encountered end of stream while trying to read type
+            no_type_eos: NoTypeEos,
+            /// encountered error while trying to read type
+            no_type_err: NoTypeErr,
+            /// encountered an invalid length
+            invalid_length: InvalidLength,
+            /// encountered error while trying to read length
+            no_length_err: NoLengthErr,
+
+            const ReadError = util.NormalizedErrorSet(Reader.Error);
+            pub const NoTypeEos = ChunkHeader.ParseReaderResult(ReadError).NoTypeEos;
+            pub const NoTypeErr = ChunkHeader.ParseReaderResult(ReadError).NoTypeErr;
+            pub const InvalidLength = ChunkHeader.ParseReaderResult(ReadError).InvalidLength;
+            pub const NoLengthErr = ChunkHeader.ParseReaderResult(ReadError).NoLengthErr;
+        };
         pub fn getHeader(self: *Self) ?GetHeaderResult {
             switch (self.state) {
                 .begin => unreachable,
@@ -182,25 +205,54 @@ pub fn RawChunkStream(comptime Reader: type) type {
 
             const result = ChunkHeader.parseReader(self.reader);
             self.state = switch (result) {
-                .ok => |header| State{ .awaiting_data = .{
-                    .header = header,
-                } },
-                else => .end,
+                .ok => |header| State{ .awaiting_data = .{ .header = header } },
+                .no_type_eos,
+                .no_type_err,
+                .invalid_length,
+                .no_length_eos,
+                .no_length_err,
+                => .end,
             };
-
-            return result;
+            return switch (result) {
+                .ok => |header| GetHeaderResult{ .ok = header },
+                .no_type_eos => |info| GetHeaderResult{ .no_type_eos = info },
+                .no_type_err => |info| GetHeaderResult{ .no_type_err = info },
+                .invalid_length => |info| GetHeaderResult{ .invalid_length = info },
+                .no_length_eos => null,
+                .no_length_err => |info| GetHeaderResult{ .no_length_err = info },
+            };
         }
 
-        pub fn getDataAndCrc(self: *Self, writer: anytype) !u32 {
-            const ctx: *State.AwaitingData = switch (self.state) {
+        pub fn getDataAndCrcWithBuffer(self: *Self, writer: anytype, intermediate_buffer: []u8) Reader.Error!@TypeOf(writer).Error!?u32 {
+            const Result = @TypeOf(writer).Error!?u32;
+
+            std.debug.assert(intermediate_buffer.len >= 1);
+            const ctx: State.AwaitingData = switch (self.state) {
                 .begin => unreachable,
                 .awaiting_header => unreachable,
-                .awaiting_data => |*ctx| ctx,
+                .awaiting_data => |ctx| ctx,
                 .end => unreachable,
             };
-            
-            std.debug.assert(ctx.bytes_read < ctx.header.length);
-            
+            errdefer self.state = .end;
+
+            var i: u32 = 0;
+            while (i != ctx.header.length) {
+                const buf_len = std.math.min(intermediate_buffer.len, ctx.header.length - i);
+                const amt = try self.reader.read(intermediate_buffer[0..buf_len]);
+
+                writer.writeAll(intermediate_buffer[0..amt]) catch |err| {
+                    self.state = .end;
+                    return util.as(Result, err);
+                };
+
+                i += amt;
+                if (amt == 0) {
+                    self.state = .end;
+                    return null;
+                }
+            }
+
+            return util.io.readIntBigOrNull(self.reader, u32) catch |err| return err;
         }
 
         const State = union(enum) {
@@ -211,7 +263,6 @@ pub fn RawChunkStream(comptime Reader: type) type {
 
             const AwaitingData = struct {
                 header: ChunkHeader,
-                bytes_read: u32 = 0,
             };
         };
     };
@@ -234,7 +285,7 @@ test "RawChunkStream.start + FixedBufferStream" {
     try std.testing.expectError(error.InvalidSignature, rcs.start() catch |err| switch (err) {});
 }
 
-test "RawChunkStream .start+ fallible reader" {
+test "RawChunkStream.start + fallible reader" {
     var fbs: std.io.FixedBufferStream([]const u8) = undefined;
     var elr: util.io.ErrorLimitedReader(@TypeOf(fbs).Reader) = undefined;
     var rcs: RawChunkStream(@TypeOf(elr).Reader) = undefined;
@@ -243,4 +294,21 @@ test "RawChunkStream .start+ fallible reader" {
     elr = util.io.errorLimitedReader(fbs.reader(), signature.len - 1);
     rcs = rawChunkStream(elr.reader());
     try std.testing.expectError(error.AttemptedToReadMoreThanLimit, rcs.start());
+}
+
+test "RawChunkStream.getHeader" {
+    var fbs: std.io.FixedBufferStream([]const u8) = undefined;
+    var rcs: RawChunkStream(@TypeOf(fbs).Reader) = undefined;
+
+    fbs = std.io.fixedBufferStream(signature[0..]);
+    rcs = rawChunkStream(fbs.reader());
+    rcs.start() catch |err| switch (err) {} catch @panic("That wasn't supposed to happen");
+    try std.testing.expectEqual(@as(?@TypeOf(rcs).GetHeaderResult, null), rcs.getHeader());
+
+    fbs = std.io.fixedBufferStream(signature[0..] ++
+        std.mem.toBytes(std.mem.nativeToBig(u32, 13)) ++
+        std.mem.toBytes(ChunkType.intBig(.IHDR)));
+    rcs = rawChunkStream(fbs.reader());
+    rcs.start() catch |err| switch (err) {} catch @panic("That wasn't supposed to happen");
+    try std.testing.expectEqual(@as(?@TypeOf(rcs).GetHeaderResult, @TypeOf(rcs).GetHeaderResult{ .ok = ChunkHeader{ .length = 13, .type = .IHDR } }), rcs.getHeader());
 }
