@@ -261,9 +261,7 @@ pub fn RawChunkStream(comptime Reader: type) type {
             awaiting_data: AwaitingData,
             end,
 
-            const AwaitingData = struct {
-                header: ChunkHeader,
-            };
+            const AwaitingData = struct { header: ChunkHeaderwell };
         };
     };
 }
