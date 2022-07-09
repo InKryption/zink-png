@@ -32,12 +32,12 @@ pub const ChunkType = enum(u32) {
         return @intToEnum(ChunkType, (std.mem.readIntBig(u32, bytes)));
     }
 
-    pub fn str(self: ChunkType) [4]u8 {
-        return std.mem.toBytes(self.int());
+    pub fn string(self: ChunkType) [4]u8 {
+        return std.mem.toBytes(self.intBig());
     }
 
-    pub fn isValid(self: ChunkType) bool {
-        for (self.str()) |byte| {
+    pub fn isValidAscii(self: ChunkType) bool {
+        for (self.string()) |byte| {
             if (!std.ascii.isAlpha(byte)) return false;
         }
         return true;
@@ -54,15 +54,38 @@ pub const ChunkType = enum(u32) {
     }
 
     pub fn property(self: ChunkType, byte_index: u2) bool {
-        return (self.str()[byte_index] & 32) != 0;
+        return (self.string()[byte_index] & 32) != 0;
+    }
+
+    pub fn format(
+        ch_type: ChunkType,
+        comptime fmt_str: []const u8,
+        fmt_options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) @TypeOf(writer).Error!void {
+        _ = fmt_str;
+        _ = fmt_options;
+        const lazy = struct {
+            const unknown_format_str = @compileError("Unknown format string '" ++ fmt_str ++ "'.\n");
+        };
+
+        if (fmt_str.len != 0) lazy.unknown_format_str;
+        return writer.print(@typeName(@This()) ++ "({s})", .{ch_type.string()});
     }
 };
 
 pub const ChunkHeader = struct {
-    length: u31,
-    type: ChunkType,
+    length: u31 align(@alignOf(u32)),
+    type: ChunkType align(@alignOf(u32)),
 
-    pub fn parseBytes(bytes: *const [@sizeOf(u32) * 2]u8) ChunkHeader {
+    pub fn toBytes(header: ChunkHeader) [8]u8 {
+        var result: [8]u8 = undefined;
+        result[0..4].* = std.mem.toBytes(std.mem.nativeToBig(u32, header.length));
+        result[4..8].* = header.type.string();
+        return result;
+    }
+
+    pub fn fromBytes(bytes: *const [8]u8) ChunkHeader {
         return switch (ChunkHeader.parseBuffer(bytes)) {
             .ok => |value| value,
             else => unreachable,
@@ -72,9 +95,11 @@ pub const ChunkHeader = struct {
     pub const ParseBufferResult = union(enum) {
         ok: ChunkHeader,
         no_type: NoType,
+        invalid_length: InvalidLength,
         no_length: NoLength,
 
-        pub const NoType = struct { length: u32 };
+        pub const NoType = struct { length: u31 };
+        pub const InvalidLength = struct { length: u32 };
         pub const NoLength = struct {};
     };
 
@@ -82,15 +107,24 @@ pub const ChunkHeader = struct {
         var fbs = std.io.fixedBufferStream(buffer);
         return switch (ChunkHeader.parseReader(fbs.reader())) {
             .ok => |value| ParseBufferResult{ .ok = value },
-            .no_type_eos => |info| ParseBufferResult{ .no_type = .{ .length = info.length } },
+            .no_type_eos => |info| ParseBufferResult{ .no_type = info },
             .no_type_err => unreachable,
-            .no_length_eos => ParseBufferResult{ .no_length = .{} },
+            .invalid_length => |info| ParseBufferResult{ .invalid_length = info },
+            .no_length_eos => |info| ParseBufferResult{ .no_length = info },
             .no_length_err => unreachable,
         };
     }
 
+    pub const ParseReaderResultTag = enum {
+        ok,
+        no_type_eos,
+        no_type_err,
+        invalid_length,
+        no_length_eos,
+        no_length_err,
+    };
     pub fn ParseReaderResult(comptime ReaderError: type) type {
-        return union(enum) {
+        return union(ParseReaderResultTag) {
             /// success
             ok: ChunkHeader,
             /// encountered end of stream while trying to read type
@@ -105,10 +139,10 @@ pub const ChunkHeader = struct {
             no_length_err: NoLengthErr,
 
             pub const ReadError = ReaderError;
-            pub const NoTypeEos = struct { length: u31 };
+            pub const NoTypeEos = ParseBufferResult.NoType;
             pub const NoTypeErr = struct { length: u31, err: ReadError };
-            pub const InvalidLength = struct { length: u32 };
-            pub const NoLengthEos = struct {};
+            pub const InvalidLength = ParseBufferResult.InvalidLength;
+            pub const NoLengthEos = ParseBufferResult.NoLength;
             pub const NoLengthErr = struct { err: ReadError };
         };
     }
@@ -134,4 +168,144 @@ pub const ChunkHeader = struct {
             .type = @intToEnum(ChunkType, type_value),
         } };
     }
+};
+
+test "ChunkType & ChunkHeader" {
+    try std.testing.expectEqualStrings("WOAH", &ChunkType.from("WOAH").string());
+    for (@as([4096]void, undefined)) |_, i| {
+        inline for (comptime std.enums.values(ChunkType)) |ch_type| {
+            const header = ChunkHeader{
+                .length = @intCast(u31, i),
+                .type = ch_type,
+            };
+            try std.testing.expectEqual(header, ChunkHeader.fromBytes(&header.toBytes()));
+        }
+    }
+
+    var fbs: std.io.FixedBufferStream([]const u8) = undefined;
+    var elr: util.io.ErrorLimitedReader(@TypeOf(fbs).Reader) = undefined;
+
+    fbs = std.io.fixedBufferStream("");
+    elr = undefined;
+    try std.testing.expectEqual(ChunkHeader.ParseReaderResultTag.no_length_eos, ChunkHeader.parseReader(fbs.reader()));
+
+    fbs = std.io.fixedBufferStream("");
+    elr = util.io.errorLimitedReader(fbs.reader(), 0);
+    try std.testing.expectEqual(ChunkHeader.ParseReaderResultTag.no_length_err, ChunkHeader.parseReader(elr.reader()));
+
+    fbs = std.io.fixedBufferStream(comptime &std.mem.toBytes(std.mem.nativeToBig(u32, std.math.maxInt(u31) + 1)));
+    elr = undefined;
+    try std.testing.expectEqual(ChunkHeader.ParseReaderResultTag.invalid_length, ChunkHeader.parseReader(fbs.reader()));
+
+    fbs = std.io.fixedBufferStream(comptime &std.mem.toBytes(std.mem.nativeToBig(u32, std.math.maxInt(u31))));
+    elr = util.io.errorLimitedReader(fbs.reader(), 4);
+    try std.testing.expectEqual(ChunkHeader.ParseReaderResultTag.no_type_err, ChunkHeader.parseReader(elr.reader()));
+
+    fbs = std.io.fixedBufferStream(comptime &std.mem.toBytes(std.mem.nativeToBig(u32, std.math.maxInt(u31))));
+    elr = undefined;
+    try std.testing.expectEqual(ChunkHeader.ParseReaderResultTag.no_type_eos, ChunkHeader.parseReader(fbs.reader()));
+
+    fbs = std.io.fixedBufferStream(comptime &std.mem.toBytes(std.mem.nativeToBig(u32, std.math.maxInt(u31))) ++ ChunkType.string(.IHDR));
+    elr = undefined;
+    try std.testing.expectEqual(ChunkHeader.ParseReaderResultTag.ok, ChunkHeader.parseReader(fbs.reader()));
+}
+
+pub const ChunkDataIHDR = struct {
+    width: u31 align(@alignOf(u32)),
+    height: u31 align(@alignOf(u32)),
+    bit_depth: BitDepth align(@alignOf(u8)),
+    color_type: ColorType align(@alignOf(u8)),
+    compression_method: CompressionMethod align(@alignOf(u8)),
+    filter_method: FilterMethod align(@alignOf(u8)),
+    interlace_method: InterlaceMethod align(@alignOf(u8)),
+
+    pub const BitDepth = enum(u4) {
+        @"1" = 1,
+        @"2" = 2,
+        @"4" = 4,
+        @"8" = 8,
+        @"16" = 16,
+    };
+    pub const ColorType = enum(u3) {
+        // zig fmt: off
+        grayscale          = 0 + 0 + 0, // 0
+        rgb         = 0 + 2 + 0, // 2
+        palette = 1 + 2 + 0, // 3
+        grayscale_alpha         = 0 + 0 + 4, // 4
+        rgb_alpha   = 0 + 2 + 4, // 6
+        // zig fmt: on
+
+        pub fn colorEnabled(color_type: ColorType) bool {
+            return @enumToInt(color_type) & 2 != 0;
+        }
+        pub fn alphaEnabled(color_type: ColorType) bool {
+            return @enumToInt(color_type) & 4 != 0;
+        }
+        pub fn paletteEnabled(color_type: ColorType) bool {
+            return @enumToInt(color_type) & 1 != 0;
+        }
+
+        pub fn bitDepthEnabled(color_type: ColorType, bit_depth: BitDepth) bool {
+            return switch (color_type) {
+                .grayscale => switch (bit_depth) {
+                    .@"1",
+                    .@"2",
+                    .@"4",
+                    .@"8",
+                    .@"16",
+                    => true,
+                },
+                .rgb => switch (bit_depth) {
+                    .@"1",
+                    .@"2",
+                    .@"4",
+                    => false,
+                    .@"8",
+                    .@"16",
+                    => true,
+                },
+                .palette => switch (bit_depth) {
+                    .@"1",
+                    .@"2",
+                    .@"4",
+                    .@"8",
+                    => true,
+                    .@"16" => false,
+                },
+                .grayscale_alpha => switch (bit_depth) {
+                    .@"1",
+                    .@"2",
+                    .@"4",
+                    => false,
+                    .@"8",
+                    .@"16",
+                    => true,
+                },
+                .rgb_alpha => switch (bit_depth) {
+                    .@"1",
+                    .@"2",
+                    .@"4",
+                    => false,
+                    .@"8",
+                    .@"16",
+                    => true,
+                },
+            };
+        }
+    };
+
+    pub const CompressionMethod = enum(u8) {
+        @"0" = 0,
+        _,
+    };
+    pub const FilterMethod = enum(u8) {
+        @"0" = 0,
+        _,
+    };
+    pub const InterlaceMethod = enum(u8) {
+        @"0" = 0,
+        /// Adam7 interlace
+        @"1" = 1,
+        _,
+    };
 };

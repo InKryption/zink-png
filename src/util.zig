@@ -57,7 +57,8 @@ pub const io = struct {
             }
 
             fn read(self: *Self, buffer: []u8) ReadError!usize {
-                if (buffer.len != 0 and self.inner.bytes_read == self.limit) {
+                std.debug.assert(self.inner.bytes_read <= self.limit);
+                if (self.inner.bytes_read == self.limit) {
                     return error.AttemptedToReadMoreThanLimit;
                 }
                 const remaining_bytes = self.limit - self.inner.bytes_read;
