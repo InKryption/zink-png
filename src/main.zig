@@ -63,14 +63,16 @@ pub const ChunkType = enum(u32) {
         fmt_options: std.fmt.FormatOptions,
         writer: anytype,
     ) @TypeOf(writer).Error!void {
-        _ = fmt_str;
         _ = fmt_options;
         const lazy = struct {
             const unknown_format_str = @compileError("Unknown format string '" ++ fmt_str ++ "'.\n");
         };
 
-        if (fmt_str.len != 0) lazy.unknown_format_str;
-        return writer.print(@typeName(@This()) ++ "({s})", .{ch_type.string()});
+        switch (fmt_str.len) {
+            0 => {},
+            else => lazy.unknown_format_str,
+        }
+        return writer.print("{s}({s})", .{ @typeName(@This()), ch_type.string() });
     }
 };
 
@@ -85,88 +87,43 @@ pub const ChunkHeader = struct {
         return result;
     }
 
-    pub fn fromBytes(bytes: *const [8]u8) ChunkHeader {
-        return switch (ChunkHeader.parseBuffer(bytes)) {
-            .ok => |value| value,
-            else => unreachable,
+    pub const FromBytesResult = struct {
+        length: Length,
+        type: ChunkType,
+
+        pub const Length = union(enum) {
+            ok: u31,
+            invalid: u32,
         };
-    }
 
-    pub const ParseBufferResult = union(enum) {
-        ok: ChunkHeader,
-        no_type: NoType,
-        invalid_length: InvalidLength,
-        no_length: NoLength,
-
-        pub const NoType = struct { length: u31 };
-        pub const InvalidLength = struct { length: u32 };
-        pub const NoLength = struct {};
+        pub const UnwrapError = error{InvalidLength};
+        pub fn unwrap(result: FromBytesResult) UnwrapError!ChunkHeader {
+            return ChunkHeader{
+                .length = switch (result.length) {
+                    .ok => |length| length,
+                    .invalid => return error.InvalidLength,
+                },
+                .type = result.type,
+            };
+        }
     };
 
-    pub fn parseBuffer(buffer: []const u8) ParseBufferResult {
-        var fbs = std.io.fixedBufferStream(buffer);
-        return switch (ChunkHeader.parseReader(fbs.reader())) {
-            .ok => |value| ParseBufferResult{ .ok = value },
-            .no_type_eos => |info| ParseBufferResult{ .no_type = info },
-            .no_type_err => unreachable,
-            .invalid_length => |info| ParseBufferResult{ .invalid_length = info },
-            .no_length_eos => |info| ParseBufferResult{ .no_length = info },
-            .no_length_err => unreachable,
-        };
-    }
+    pub fn fromBytes(bytes: [8]u8) FromBytesResult {
+        var fbs = std.io.fixedBufferStream(bytes[0..]);
+        var result: FromBytesResult = undefined;
 
-    pub const ParseReaderResultTag = enum {
-        ok,
-        no_type_eos,
-        no_type_err,
-        invalid_length,
-        no_length_eos,
-        no_length_err,
-    };
-    pub fn ParseReaderResult(comptime ReaderError: type) type {
-        return union(ParseReaderResultTag) {
-            /// success
-            ok: ChunkHeader,
-            /// encountered end of stream while trying to read type
-            no_type_eos: NoTypeEos,
-            /// encountered error while trying to read type
-            no_type_err: NoTypeErr,
-            /// encountered an invalid length
-            invalid_length: InvalidLength,
-            /// encountered end of stream while trying to read length
-            no_length_eos: NoLengthEos,
-            /// encountered error while trying to read length
-            no_length_err: NoLengthErr,
-
-            pub const ReadError = ReaderError;
-            pub const NoTypeEos = ParseBufferResult.NoType;
-            pub const NoTypeErr = struct { length: u31, err: ReadError };
-            pub const InvalidLength = ParseBufferResult.InvalidLength;
-            pub const NoLengthEos = ParseBufferResult.NoLength;
-            pub const NoLengthErr = struct { err: ReadError };
-        };
-    }
-
-    /// Returns null if the stream ends before returning the required number of bytes for a chunk header.
-    pub fn parseReader(reader: anytype) ParseReaderResult(util.NormalizedErrorSet(@TypeOf(reader).Error)) {
-        const PResult = ParseReaderResult(util.NormalizedErrorSet(@TypeOf(reader).Error));
-
-        const length = if (util.io.readIntBigOrNull(reader, u32)) |maybe_length| length: {
-            const length = maybe_length orelse return PResult{ .no_length_eos = .{} };
-            break :length std.math.cast(u31, length) orelse
-                return PResult{ .invalid_length = .{ .length = length } };
-        } else |err| {
-            return PResult{ .no_length_err = .{ .err = err } };
+        result.length = length: {
+            const raw_len = fbs.reader().readIntBig(u32) catch unreachable;
+            break :length if (std.math.cast(u31, raw_len)) |length|
+                FromBytesResult.Length{ .ok = length }
+            else
+                FromBytesResult.Length{ .invalid = raw_len };
         };
 
-        const type_value = util.io.readIntBigOrNull(reader, u32) catch |err| {
-            return PResult{ .no_type_err = .{ .err = err, .length = length } };
-        } orelse return PResult{ .no_type_eos = .{ .length = length } };
+        result.type = ChunkType.from(&(fbs.reader().readBytesNoEof(4) catch unreachable));
 
-        return PResult{ .ok = ChunkHeader{
-            .length = length,
-            .type = @intToEnum(ChunkType, type_value),
-        } };
+        std.debug.assert(fbs.pos == bytes.len);
+        return result;
     }
 };
 
@@ -174,47 +131,34 @@ test "ChunkType & ChunkHeader" {
     try std.testing.expectEqualStrings("WOAH", &ChunkType.from("WOAH").string());
     for (@as([4096]void, undefined)) |_, i| {
         inline for (comptime std.enums.values(ChunkType)) |ch_type| {
-            const header = ChunkHeader{
+            const valid_header = ChunkHeader{
                 .length = @intCast(u31, i),
                 .type = ch_type,
             };
-            try std.testing.expectEqual(header, ChunkHeader.fromBytes(&header.toBytes()));
+            try std.testing.expectEqual(valid_header, ChunkHeader.fromBytes(valid_header.toBytes()).unwrap() catch @panic("That shouldn't have happened."));
+
+            const invalid_len: u32 = comptime std.math.maxInt(u31) + 1 + @intCast(u32, i);
+            const bytes_with_invalid_len: [8]u8 = blk: {
+                var bytes_with_invalid_len: [8]u8 = undefined;
+                bytes_with_invalid_len[0..4].* = std.mem.toBytes(std.mem.nativeToBig(u32, invalid_len));
+                bytes_with_invalid_len[4..8].* = ch_type.string();
+                break :blk bytes_with_invalid_len;
+            };
+            try std.testing.expectEqual(ChunkHeader.FromBytesResult{
+                .length = .{ .invalid = invalid_len },
+                .type = ch_type,
+            }, ChunkHeader.fromBytes(bytes_with_invalid_len));
         }
     }
-
-    var fbs: std.io.FixedBufferStream([]const u8) = undefined;
-    var elr: util.io.ErrorLimitedReader(@TypeOf(fbs).Reader) = undefined;
-
-    fbs = std.io.fixedBufferStream("");
-    elr = undefined;
-    try std.testing.expectEqual(ChunkHeader.ParseReaderResultTag.no_length_eos, ChunkHeader.parseReader(fbs.reader()));
-
-    fbs = std.io.fixedBufferStream("");
-    elr = util.io.errorLimitedReader(fbs.reader(), 0);
-    try std.testing.expectEqual(ChunkHeader.ParseReaderResultTag.no_length_err, ChunkHeader.parseReader(elr.reader()));
-
-    fbs = std.io.fixedBufferStream(comptime &std.mem.toBytes(std.mem.nativeToBig(u32, std.math.maxInt(u31) + 1)));
-    elr = undefined;
-    try std.testing.expectEqual(ChunkHeader.ParseReaderResultTag.invalid_length, ChunkHeader.parseReader(fbs.reader()));
-
-    fbs = std.io.fixedBufferStream(comptime &std.mem.toBytes(std.mem.nativeToBig(u32, std.math.maxInt(u31))));
-    elr = util.io.errorLimitedReader(fbs.reader(), 4);
-    try std.testing.expectEqual(ChunkHeader.ParseReaderResultTag.no_type_err, ChunkHeader.parseReader(elr.reader()));
-
-    fbs = std.io.fixedBufferStream(comptime &std.mem.toBytes(std.mem.nativeToBig(u32, std.math.maxInt(u31))));
-    elr = undefined;
-    try std.testing.expectEqual(ChunkHeader.ParseReaderResultTag.no_type_eos, ChunkHeader.parseReader(fbs.reader()));
-
-    fbs = std.io.fixedBufferStream(comptime &std.mem.toBytes(std.mem.nativeToBig(u32, std.math.maxInt(u31))) ++ ChunkType.string(.IHDR));
-    elr = undefined;
-    try std.testing.expectEqual(ChunkHeader.ParseReaderResultTag.ok, ChunkHeader.parseReader(fbs.reader()));
 }
 
 pub const ChunkDataIHDR = struct {
     width: u31 align(@alignOf(u32)),
     height: u31 align(@alignOf(u32)),
+
     bit_depth: BitDepth align(@alignOf(u8)),
     color_type: ColorType align(@alignOf(u8)),
+
     compression_method: CompressionMethod align(@alignOf(u8)),
     filter_method: FilterMethod align(@alignOf(u8)),
     interlace_method: InterlaceMethod align(@alignOf(u8)),
@@ -303,9 +247,86 @@ pub const ChunkDataIHDR = struct {
         _,
     };
     pub const InterlaceMethod = enum(u8) {
-        @"0" = 0,
-        /// Adam7 interlace
-        @"1" = 1,
+        none = 0,
+        adam7 = 1,
         _,
     };
+
+    pub fn toBytes(ihdr: ChunkDataIHDR) [13]u8 {
+        return [0]u8{} ++
+            std.mem.toBytes(std.mem.nativeToBig(u32, ihdr.width)) ++
+            std.mem.toBytes(std.mem.nativeToBig(u32, ihdr.height)) ++
+            std.mem.toBytes(std.mem.nativeToBig(u8, @enumToInt(ihdr.bit_depth))) ++
+            std.mem.toBytes(std.mem.nativeToBig(u8, @enumToInt(ihdr.color_type))) ++
+            std.mem.toBytes(std.mem.nativeToBig(u8, @enumToInt(ihdr.compression_method))) ++
+            std.mem.toBytes(std.mem.nativeToBig(u8, @enumToInt(ihdr.filter_method))) ++
+            std.mem.toBytes(std.mem.nativeToBig(u8, @enumToInt(ihdr.interlace_method)));
+    }
+
+    pub const FromBytesResult = struct {
+        width: WidthResult,
+        height: HeightResult,
+
+        bit_depth: BitDepthResult,
+        color_type: ColorTypeResult,
+
+        compression_method: CompressionMethod,
+        filter_method: FilterMethod,
+        interlace_method: InterlaceMethod,
+
+        pub const WidthResult = union(enum) { ok: u31, invalid: u32 };
+        pub const HeightResult = union(enum) { ok: u31, invalid: u32 };
+
+        pub const BitDepthResult = union(enum) { ok: BitDepth, invalid: u8, invalid_for_color: BitDepth };
+        pub const ColorTypeResult = union(enum) { ok: ColorType, invalid: u8 };
+
+        pub const UnwrapError = error{
+            InvalidWidth,
+            InvalidHeight,
+            InvalidBitDepth,
+            InvalidColorType,
+            InvalidBitDepthForColorType,
+        };
+        pub fn unwrap(result: FromBytesResult) UnwrapError!ChunkDataIHDR {
+            const width: u31 = switch (result.width) {
+                .ok => |width| width,
+                .invalid => return error.InvalidWidth,
+            };
+            const height: u31 = switch (result.height) {
+                .ok => |height| height,
+                .invalid => return error.InvalidHeight,
+            };
+
+            const bit_depth: BitDepth = switch (result.bit_depth) {
+                .ok => |bit_depth| bit_depth,
+                .invalid => return error.InvalidBitDepth,
+                .invalid_for_color => |bit_depth| {
+                    std.debug.assert(result.color_type == .ok);
+                    std.debug.assert(!result.color_type.ok.bitDepthEnabled(bit_depth));
+                    return error.InvalidBitDepthForColorType;
+                },
+            };
+            const color_type: ColorType = switch (result.color_type) {
+                .ok => |color_type| color_type,
+                .invalid => return error.InvalidColorType,
+            };
+            std.debug.assert(color_type.bitDepthEnabled(bit_depth));
+
+            return ChunkDataIHDR{
+                .width = width,
+                .height = height,
+
+                .bit_depth = bit_depth,
+                .color_type = color_type,
+
+                .compression_method = result.compression_method,
+                .filter_method = result.filter_method,
+                .interlace_method = result.interlace_method,
+            };
+        }
+    };
+    pub fn fromBytes(bytes: [13]u8) FromBytesResult {
+        _ = bytes;
+        return std.debug.todo("");
+    }
 };
