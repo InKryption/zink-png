@@ -183,7 +183,7 @@ pub const ChunkDataIHDR = struct {
     filter_method: FilterMethod align(@alignOf(u8)),
     interlace_method: InterlaceMethod align(@alignOf(u8)),
 
-    pub const BitDepth = enum(u4) {
+    pub const BitDepth = enum(u5) {
         @"1" = 1,
         @"2" = 2,
         @"4" = 4,
@@ -212,47 +212,23 @@ pub const ChunkDataIHDR = struct {
         pub fn bitDepthEnabled(color_type: ColorType, bit_depth: BitDepth) bool {
             return switch (color_type) {
                 .grayscale => switch (bit_depth) {
-                    .@"1",
-                    .@"2",
-                    .@"4",
-                    .@"8",
-                    .@"16",
-                    => true,
+                    .@"1", .@"2", .@"4", .@"8", .@"16" => true,
                 },
                 .rgb => switch (bit_depth) {
-                    .@"1",
-                    .@"2",
-                    .@"4",
-                    => false,
-                    .@"8",
-                    .@"16",
-                    => true,
+                    .@"1", .@"2", .@"4" => false,
+                    .@"8", .@"16" => true,
                 },
                 .palette => switch (bit_depth) {
-                    .@"1",
-                    .@"2",
-                    .@"4",
-                    .@"8",
-                    => true,
+                    .@"1", .@"2", .@"4", .@"8" => true,
                     .@"16" => false,
                 },
                 .grayscale_alpha => switch (bit_depth) {
-                    .@"1",
-                    .@"2",
-                    .@"4",
-                    => false,
-                    .@"8",
-                    .@"16",
-                    => true,
+                    .@"1", .@"2", .@"4" => false,
+                    .@"8", .@"16" => true,
                 },
                 .rgb_alpha => switch (bit_depth) {
-                    .@"1",
-                    .@"2",
-                    .@"4",
-                    => false,
-                    .@"8",
-                    .@"16",
-                    => true,
+                    .@"1", .@"2", .@"4" => false,
+                    .@"8", .@"16" => true,
                 },
             };
         }
@@ -283,6 +259,7 @@ pub const ChunkDataIHDR = struct {
         fbs.writer().writeIntBig(u8, @enumToInt(ihdr.compression_method)) catch unreachable;
         fbs.writer().writeIntBig(u8, @enumToInt(ihdr.filter_method)) catch unreachable;
         fbs.writer().writeIntBig(u8, @enumToInt(ihdr.interlace_method)) catch unreachable;
+        std.debug.assert(fbs.pos == result.len);
 
         return result;
     }
@@ -437,9 +414,7 @@ pub const ChunkDataIHDR = struct {
             const interlace_method_raw: u8 = fbs.reader().readIntBig(u8) catch unreachable;
             const interlace_method = @intToEnum(InterlaceMethod, interlace_method_raw);
             break :interlace_method switch (interlace_method) {
-                .none,
-                .adam7,
-                => .{ .ok = interlace_method },
+                .none, .adam7 => .{ .ok = interlace_method },
                 _ => .{ .unrecognized = interlace_method },
             };
         };
@@ -459,7 +434,8 @@ pub const ChunkDataIHDR = struct {
 };
 
 test "ChunkDataIHDR" {
-    std.log.warn("\nTODO: test stuff here.\n", .{});
+    _ = ChunkDataIHDR;
+    std.log.warn("\nTODO: test stuff here.", .{});
     return error.SkipZigTest;
 }
 
@@ -467,20 +443,84 @@ pub const ChunkDataPLTE = struct {
     entries_buf: [256]Entry,
     count_minus_one: u8,
 
-    pub const Entry = struct { r: u8, g: u8, b: u8 };
+    pub const Entry = extern struct { r: u8, g: u8, b: u8 };
     pub fn count(plte: ChunkDataPLTE) !std.math.IntFittingRange(1, 256) {
-        return @as(u9, plte.count_minus_one) + 1;
+        return @as(std.math.IntFittingRange(1, 256), plte.count_minus_one) + 1;
     }
     pub fn entries(plte: *const ChunkDataPLTE) []const Entry {
         return plte.entries_buf[0..plte.count()];
     }
 
-    pub fn toBytes(plte: ChunkDataPLTE) std.BoundedArray(u8, 256) {
-        _ = plte;
+    pub const RawBytes = std.BoundedArray(u8, 256 * 3);
 
-        var result = std.BoundedArray(u8, 256){};
-        _ = result;
+    pub fn toBytes(plte: ChunkDataPLTE) RawBytes {
+        var result = RawBytes{};
+        for (plte.entries()) |entry| {
+            result.appendSlice(&[_]u8{ entry.r, entry.g, entry.b }) catch unreachable;
+        }
+        return result;
+    }
 
-        return std.debug.todo("");
+    pub const FromBytesResult = union(enum) {
+        ok: ChunkDataPLTE,
+        missing_one_byte: MissingOneByte,
+        missing_two_bytes: MissingTwoBytes,
+
+        pub const MissingOneByte = struct {
+            full: std.BoundedArray(Entry, 255),
+            trailing: Trailing,
+            pub const Trailing = struct { r: u8, g: u8 };
+        };
+        pub const MissingTwoBytes = struct {
+            full: std.BoundedArray(Entry, 255),
+            trailing: Trailing,
+            pub const Trailing = struct { r: u8 };
+        };
+    };
+    /// Asserts `bytes.len > 0`.
+    pub fn fromBytes(bytes: RawBytes) FromBytesResult {
+        std.debug.assert(bytes.len > 0);
+
+        var result_entries = std.BoundedArray(Entry, 256){};
+        const used_bytes_len = bytes.len - (bytes.len % 3);
+
+        comptime std.debug.assert(@typeInfo(Entry).Struct.layout == .Extern);
+        comptime std.debug.assert(std.mem.eql(u8, @typeInfo(Entry).Struct.fields[0].name, "r"));
+        comptime std.debug.assert(std.mem.eql(u8, @typeInfo(Entry).Struct.fields[1].name, "g"));
+        comptime std.debug.assert(std.mem.eql(u8, @typeInfo(Entry).Struct.fields[2].name, "b"));
+        result_entries.appendSliceAssumeCapacity(std.mem.bytesAsSlice(Entry, bytes.constSlice()[0..used_bytes_len]));
+
+        return switch (bytes.len - used_bytes_len) {
+            0 => FromBytesResult{ .ok = ChunkDataPLTE{
+                .entries_buf = result_entries.buffer,
+                .count_minus_one = @intCast(u8, result_entries.len - 1),
+            } },
+            1 => FromBytesResult{ .missing_one_byte = FromBytesResult.MissingOneByte{
+                .full = std.BoundedArray(Entry, 255).fromSlice(entries.constSlice()) catch unreachable,
+                .trailing = .{
+                    .r = bytes.get(bytes.len - 2),
+                    .g = bytes.get(bytes.len - 1),
+                },
+            } },
+            2 => FromBytesResult{ .missing_two_bytes = FromBytesResult.MissingTwoBytes{
+                .full = std.BoundedArray(Entry, 255).fromSlice(entries.constSlice()) catch unreachable,
+                .trailing = .{
+                    .r = bytes.get(bytes.len - 1),
+                },
+            } },
+            else => unreachable,
+        };
     }
 };
+
+test "ChunkDataPLTE" {
+    _ = ChunkDataPLTE;
+    std.log.warn("\nTODO: test stuff here.", .{});
+    return error.SkipZigTest;
+}
+
+pub const ChunkDataIDAT = struct {
+    bytes: []const u8,
+};
+
+pub const ChunkDataIEND = struct {};
