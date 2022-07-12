@@ -28,8 +28,8 @@ pub const ChunkType = enum(u32) {
     // Non-Standard Chunk Types
     _,
 
-    pub fn from(bytes: *const [4]u8) ChunkType {
-        return @intToEnum(ChunkType, (std.mem.readIntBig(u32, bytes)));
+    pub fn from(bytes: [4]u8) ChunkType {
+        return @intToEnum(ChunkType, (std.mem.readIntBig(u32, bytes[0..])));
     }
 
     pub fn string(self: ChunkType) [4]u8 {
@@ -82,73 +82,93 @@ pub const ChunkHeader = struct {
 
     pub fn toBytes(header: ChunkHeader) [8]u8 {
         var result: [8]u8 = undefined;
-        result[0..4].* = std.mem.toBytes(std.mem.nativeToBig(u32, header.length));
-        result[4..8].* = header.type.string();
+        var fbs = std.io.fixedBufferStream(result[0..]);
+        fbs.writer().writeIntBig(u32, header.length) catch unreachable;
+        fbs.writer().writeAll(header.type.string()[0..]) catch unreachable;
         return result;
     }
 
     pub const FromBytesResult = struct {
         length: Length,
-        type: ChunkType,
+        type: Type,
 
-        pub const Length = union(enum) {
-            ok: u31,
-            invalid: u32,
+        pub const Length = union(enum) { ok: u31, invalid: u32 };
+        /// `ok.isValidAscii()` => `true`
+        /// `invalid.isValidAscii()` => `false`
+        pub const Type = union(enum) { ok: ChunkType, invalid: ChunkType };
+
+        pub const UnwrapError = error{
+            InvalidLength,
+            InvalidType,
         };
-
-        pub const UnwrapError = error{InvalidLength};
         pub fn unwrap(result: FromBytesResult) UnwrapError!ChunkHeader {
             return ChunkHeader{
                 .length = switch (result.length) {
                     .ok => |length| length,
                     .invalid => return error.InvalidLength,
                 },
-                .type = result.type,
+                .type = switch (result.type) {
+                    .ok => |ch_type| ch_type,
+                    .invalid => return error.InvalidType,
+                },
             };
         }
     };
 
     pub fn fromBytes(bytes: [8]u8) FromBytesResult {
         var fbs = std.io.fixedBufferStream(bytes[0..]);
-        var result: FromBytesResult = undefined;
-
-        result.length = length: {
-            const raw_len = fbs.reader().readIntBig(u32) catch unreachable;
-            break :length if (std.math.cast(u31, raw_len)) |length|
-                FromBytesResult.Length{ .ok = length }
-            else
-                FromBytesResult.Length{ .invalid = raw_len };
+        return FromBytesResult{
+            .length = length: {
+                const raw_len = fbs.reader().readIntBig(u32) catch unreachable;
+                break :length if (std.math.cast(u31, raw_len)) |length|
+                    FromBytesResult.Length{ .ok = length }
+                else
+                    FromBytesResult.Length{ .invalid = raw_len };
+            },
+            .type = ch_type: {
+                const ch_type = ChunkType.from(fbs.reader().readBytesNoEof(4) catch unreachable);
+                break :ch_type if (ch_type.isValidAscii())
+                    FromBytesResult.Type{ .ok = ch_type }
+                else
+                    FromBytesResult.Type{ .invalid = ch_type };
+            },
         };
-
-        result.type = ChunkType.from(&(fbs.reader().readBytesNoEof(4) catch unreachable));
-
-        std.debug.assert(fbs.pos == bytes.len);
-        return result;
     }
 };
 
 test "ChunkType & ChunkHeader" {
-    try std.testing.expectEqualStrings("WOAH", &ChunkType.from("WOAH").string());
-    for (@as([4096]void, undefined)) |_, i| {
-        inline for (comptime std.enums.values(ChunkType)) |ch_type| {
+    try std.testing.expectEqualStrings("WOAH", &ChunkType.from("WOAH".*).string());
+    for (@as([4096]void, undefined)) |_, sample_valid_ch_len| {
+        inline for (comptime std.enums.values(ChunkType)) |sample_valid_ch_ty| {
             const valid_header = ChunkHeader{
-                .length = @intCast(u31, i),
-                .type = ch_type,
+                .length = @intCast(u31, sample_valid_ch_len),
+                .type = sample_valid_ch_ty,
             };
             try std.testing.expectEqual(valid_header, ChunkHeader.fromBytes(valid_header.toBytes()).unwrap() catch @panic("That shouldn't have happened."));
 
-            const invalid_len: u32 = comptime std.math.maxInt(u31) + 1 + @intCast(u32, i);
-            const bytes_with_invalid_len: [8]u8 = blk: {
-                var bytes_with_invalid_len: [8]u8 = undefined;
-                bytes_with_invalid_len[0..4].* = std.mem.toBytes(std.mem.nativeToBig(u32, invalid_len));
-                bytes_with_invalid_len[4..8].* = ch_type.string();
-                break :blk bytes_with_invalid_len;
-            };
+            const invalid_len: u32 = std.math.maxInt(u31) + 1 + @intCast(u32, sample_valid_ch_len);
             try std.testing.expectEqual(ChunkHeader.FromBytesResult{
                 .length = .{ .invalid = invalid_len },
-                .type = ch_type,
-            }, ChunkHeader.fromBytes(bytes_with_invalid_len));
+                .type = .{ .ok = sample_valid_ch_ty },
+            }, ChunkHeader.fromBytes(blk: {
+                var bytes_with_invalid_len: [8]u8 = undefined;
+                bytes_with_invalid_len[0..4].* = std.mem.toBytes(std.mem.nativeToBig(u32, invalid_len));
+                bytes_with_invalid_len[4..8].* = sample_valid_ch_ty.string();
+                break :blk bytes_with_invalid_len;
+            }));
         }
+        try std.testing.expectEqual(
+            ChunkHeader.FromBytesResult{
+                .length = .{ .ok = @intCast(u31, sample_valid_ch_len) },
+                .type = .{ .invalid = ChunkType.from("0000".*) },
+            },
+            ChunkHeader.fromBytes(blk: {
+                var bytes_with_invalid_type: [8]u8 = undefined;
+                bytes_with_invalid_type[0..4].* = std.mem.toBytes(std.mem.nativeToBig(u32, @intCast(u31, sample_valid_ch_len)));
+                bytes_with_invalid_type[4..8].* = ChunkType.from("0000".*).string();
+                break :blk bytes_with_invalid_type;
+            }),
+        );
     }
 }
 
@@ -253,14 +273,18 @@ pub const ChunkDataIHDR = struct {
     };
 
     pub fn toBytes(ihdr: ChunkDataIHDR) [13]u8 {
-        return [0]u8{} ++
-            std.mem.toBytes(std.mem.nativeToBig(u32, ihdr.width)) ++
-            std.mem.toBytes(std.mem.nativeToBig(u32, ihdr.height)) ++
-            std.mem.toBytes(std.mem.nativeToBig(u8, @enumToInt(ihdr.bit_depth))) ++
-            std.mem.toBytes(std.mem.nativeToBig(u8, @enumToInt(ihdr.color_type))) ++
-            std.mem.toBytes(std.mem.nativeToBig(u8, @enumToInt(ihdr.compression_method))) ++
-            std.mem.toBytes(std.mem.nativeToBig(u8, @enumToInt(ihdr.filter_method))) ++
-            std.mem.toBytes(std.mem.nativeToBig(u8, @enumToInt(ihdr.interlace_method)));
+        var result: [13]u8 = undefined;
+        var fbs = std.io.fixedBufferStream(result[0..]);
+
+        fbs.writer().writeIntBig(u32, ihdr.width) catch unreachable;
+        fbs.writer().writeIntBig(u32, ihdr.height) catch unreachable;
+        fbs.writer().writeIntBig(u8, @enumToInt(ihdr.bit_depth)) catch unreachable;
+        fbs.writer().writeIntBig(u8, @enumToInt(ihdr.color_type)) catch unreachable;
+        fbs.writer().writeIntBig(u8, @enumToInt(ihdr.compression_method)) catch unreachable;
+        fbs.writer().writeIntBig(u8, @enumToInt(ihdr.filter_method)) catch unreachable;
+        fbs.writer().writeIntBig(u8, @enumToInt(ihdr.interlace_method)) catch unreachable;
+
+        return result;
     }
 
     pub const FromBytesResult = struct {
@@ -270,47 +294,77 @@ pub const ChunkDataIHDR = struct {
         bit_depth: BitDepthResult,
         color_type: ColorTypeResult,
 
-        compression_method: CompressionMethod,
-        filter_method: FilterMethod,
-        interlace_method: InterlaceMethod,
+        compression_method: CompressionMethodResult,
+        filter_method: FilterMethodResult,
+        interlace_method: InterlaceMethodResult,
 
         pub const WidthResult = union(enum) { ok: u31, invalid: u32 };
         pub const HeightResult = union(enum) { ok: u31, invalid: u32 };
 
-        pub const BitDepthResult = union(enum) { ok: BitDepth, invalid: u8, invalid_for_color: BitDepth };
-        pub const ColorTypeResult = union(enum) { ok: ColorType, invalid: u8 };
+        pub const BitDepthResult = union(enum) { ok: BitDepth, invalid: u8 };
+        pub const ColorTypeResult = union(enum) { ok: ColorType, invalid_for_bit_depth: ColorType, invalid: u8 };
+
+        pub const CompressionMethodResult = union(enum) { ok: CompressionMethod, unrecognized: CompressionMethod };
+        pub const FilterMethodResult = union(enum) { ok: FilterMethod, unrecognized: FilterMethod };
+        pub const InterlaceMethodResult = union(enum) { ok: InterlaceMethod, unrecognized: InterlaceMethod };
 
         pub const UnwrapError = error{
             InvalidWidth,
             InvalidHeight,
+
             InvalidBitDepth,
             InvalidColorType,
-            InvalidBitDepthForColorType,
+            InvalidColorTypeForBitDepth,
+
+            UnrecognizedCompressionMethod,
+            UnrecognizedFilterMethod,
+            UnrecognizedInterlaceMethod,
         };
         pub fn unwrap(result: FromBytesResult) UnwrapError!ChunkDataIHDR {
             const width: u31 = switch (result.width) {
                 .ok => |width| width,
-                .invalid => return error.InvalidWidth,
+                .invalid => |invalid_width| {
+                    std.debug.assert(invalid_width == 0 or invalid_width > std.math.maxInt(u31));
+                    return error.InvalidWidth;
+                },
             };
+            std.debug.assert(width > 0);
+
             const height: u31 = switch (result.height) {
                 .ok => |height| height,
-                .invalid => return error.InvalidHeight,
+                .invalid => |invalid_height| {
+                    std.debug.assert(invalid_height == 0 or invalid_height > std.math.maxInt(u31));
+                    return error.InvalidHeight;
+                },
             };
+            std.debug.assert(height > 0);
 
             const bit_depth: BitDepth = switch (result.bit_depth) {
                 .ok => |bit_depth| bit_depth,
                 .invalid => return error.InvalidBitDepth,
-                .invalid_for_color => |bit_depth| {
-                    std.debug.assert(result.color_type == .ok);
-                    std.debug.assert(!result.color_type.ok.bitDepthEnabled(bit_depth));
-                    return error.InvalidBitDepthForColorType;
-                },
             };
             const color_type: ColorType = switch (result.color_type) {
                 .ok => |color_type| color_type,
+                .invalid_for_bit_depth => |invalid_color| {
+                    std.debug.assert(!invalid_color.bitDepthEnabled(bit_depth));
+                    return error.InvalidColorTypeForBitDepth;
+                },
                 .invalid => return error.InvalidColorType,
             };
             std.debug.assert(color_type.bitDepthEnabled(bit_depth));
+
+            const compression_method: CompressionMethod = switch (result.compression_method) {
+                .ok => |compression_method| compression_method,
+                .unrecognized => return error.UnrecognizedCompressionMethod,
+            };
+            const filter_method: FilterMethod = switch (result.filter_method) {
+                .ok => |filter_method| filter_method,
+                .unrecognized => return error.UnrecognizedFilterMethod,
+            };
+            const interlace_method: InterlaceMethod = switch (result.interlace_method) {
+                .ok => |interlace_method| interlace_method,
+                .unrecognized => return error.UnrecognizedInterlaceMethod,
+            };
 
             return ChunkDataIHDR{
                 .width = width,
@@ -319,14 +373,114 @@ pub const ChunkDataIHDR = struct {
                 .bit_depth = bit_depth,
                 .color_type = color_type,
 
-                .compression_method = result.compression_method,
-                .filter_method = result.filter_method,
-                .interlace_method = result.interlace_method,
+                .compression_method = compression_method,
+                .filter_method = filter_method,
+                .interlace_method = interlace_method,
             };
         }
     };
     pub fn fromBytes(bytes: [13]u8) FromBytesResult {
-        _ = bytes;
+        var fbs = std.io.fixedBufferStream(bytes[0..]);
+        const width: FromBytesResult.WidthResult = width: {
+            const width_raw: u32 = fbs.reader().readIntBig(u32) catch unreachable;
+            if (width_raw == 0) {
+                break :width .{ .invalid = width_raw };
+            }
+            const width: u31 = std.math.cast(u31, width_raw) orelse break :width .{ .invalid = width_raw };
+            break :width .{ .ok = width };
+        };
+        const height: FromBytesResult.HeightResult = height: {
+            const height_raw: u32 = fbs.reader().readIntBig(u32) catch unreachable;
+            if (height_raw == 0) {
+                break :height .{ .invalid = height_raw };
+            }
+            const height: u31 = std.math.cast(u31, height_raw) orelse break :height .{ .invalid = height_raw };
+            break :height .{ .ok = height };
+        };
+
+        const bit_depth: FromBytesResult.BitDepthResult = bit_depth: {
+            const bit_depth_raw: u8 = fbs.reader().readIntBig(u8) catch unreachable;
+            if (std.meta.intToEnum(BitDepth, bit_depth_raw)) |bit_depth| {
+                break :bit_depth .{ .ok = bit_depth };
+            } else |err| switch (err) {
+                error.InvalidEnumTag => break :bit_depth .{ .invalid = bit_depth_raw },
+            }
+        };
+        const color_type: FromBytesResult.ColorTypeResult = color_type: {
+            const color_type_raw = fbs.reader().readIntBig(u8) catch unreachable;
+            const color_type = std.meta.intToEnum(ColorType, color_type_raw) catch |err| switch (err) {
+                error.InvalidEnumTag => break :color_type .{ .invalid = color_type_raw },
+            };
+            if (!color_type.bitDepthEnabled(bit_depth)) {
+                break :color_type .{ .invalid_for_bit_depth = color_type };
+            }
+            break :color_type .{ .ok = color_type };
+        };
+
+        const compression_method: FromBytesResult.CompressionMethodResult = compression_method: {
+            const compression_method_raw: u8 = fbs.reader().readIntBig(u8) catch unreachable;
+            const compression_method = @intToEnum(CompressionMethod, compression_method_raw);
+            break :compression_method switch (compression_method) {
+                .@"0" => .{ .ok = compression_method },
+                _ => .{ .unrecognized = compression_method },
+            };
+        };
+        const filter_method: FromBytesResult.FilterMethodResult = filter_method: {
+            const filter_method_raw: u8 = fbs.reader().readIntBig(u8) catch unreachable;
+            const filter_method = @intToEnum(FilterMethod, filter_method_raw);
+            break :filter_method switch (filter_method) {
+                .@"0" => .{ .ok = filter_method },
+                _ => .{ .unrecognized = filter_method },
+            };
+        };
+        const interlace_method: FromBytesResult.InterlaceMethodResult = interlace_method: {
+            const interlace_method_raw: u8 = fbs.reader().readIntBig(u8) catch unreachable;
+            const interlace_method = @intToEnum(InterlaceMethod, interlace_method_raw);
+            break :interlace_method switch (interlace_method) {
+                .none,
+                .adam7,
+                => .{ .ok = interlace_method },
+                _ => .{ .unrecognized = interlace_method },
+            };
+        };
+
+        return FromBytesResult{
+            .width = width,
+            .height = height,
+
+            .bit_depth = bit_depth,
+            .color_type = color_type,
+
+            .compression_method = compression_method,
+            .filter_method = filter_method,
+            .interlace_method = interlace_method,
+        };
+    }
+};
+
+test "ChunkDataIHDR" {
+    std.log.warn("\nTODO: test stuff here.\n", .{});
+    return error.SkipZigTest;
+}
+
+pub const ChunkDataPLTE = struct {
+    entries_buf: [256]Entry,
+    count_minus_one: u8,
+
+    pub const Entry = struct { r: u8, g: u8, b: u8 };
+    pub fn count(plte: ChunkDataPLTE) !std.math.IntFittingRange(1, 256) {
+        return @as(u9, plte.count_minus_one) + 1;
+    }
+    pub fn entries(plte: *const ChunkDataPLTE) []const Entry {
+        return plte.entries_buf[0..plte.count()];
+    }
+
+    pub fn toBytes(plte: ChunkDataPLTE) std.BoundedArray(u8, 256) {
+        _ = plte;
+
+        var result = std.BoundedArray(u8, 256){};
+        _ = result;
+
         return std.debug.todo("");
     }
 };
