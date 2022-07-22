@@ -176,14 +176,13 @@ pub const ChunkDataIHDR = struct {
     width: u31 align(@alignOf(u32)),
     height: u31 align(@alignOf(u32)),
 
-    bit_depth: BitDepth align(@alignOf(u8)),
-    color_type: ColorType align(@alignOf(u8)),
+    bit_depth_color_type: BitDepthColorType align(@alignOf(u16)),
 
     compression_method: CompressionMethod align(@alignOf(u8)),
     filter_method: FilterMethod align(@alignOf(u8)),
     interlace_method: InterlaceMethod align(@alignOf(u8)),
 
-    pub const BitDepth = enum(u5) {
+    pub const BitDepth = enum(u8) {
         @"1" = 1,
         @"2" = 2,
         @"4" = 4,
@@ -191,17 +190,17 @@ pub const ChunkDataIHDR = struct {
         @"16" = 16,
 
         pub fn colorTypeAllowed(bit_depth: BitDepth, color_type: ColorType) bool {
-            return color_type.bitDepthEnabled(bit_depth);
+            return color_type.bitDepthAllowed(bit_depth);
         }
     };
-    pub const ColorType = enum(u3) {
+    pub const ColorType = enum(u8) {
         // zig fmt: off
         // used:                | palette(1) | color(2) | alpha(4) | value
-        grayscale               = 0          + 0        + 0,      // 0
-        rgb                     = 0          + 2        + 0,      // 2
-        palette                 = 1          + 2        + 0,      // 3
-        grayscale_alpha         = 0          + 0        + 4,      // 4
-        rgb_alpha               = 0          + 2        + 4,      // 6
+        grayscale               =         0  +       0  +       0,      // 0
+        rgb                     =         0  +       2  +       0,      // 2
+        palette                 =         1  +       2  +       0,      // 3
+        grayscale_alpha         =         0  +       0  +       4,      // 4
+        rgb_alpha               =         0  +       2  +       4,      // 6
         // zig fmt: on
 
         pub fn colorEnabled(color_type: ColorType) bool {
@@ -214,7 +213,7 @@ pub const ChunkDataIHDR = struct {
             return @enumToInt(color_type) & 1 != 0;
         }
 
-        pub fn bitDepthEnabled(color_type: ColorType, bit_depth: BitDepth) bool {
+        pub fn bitDepthAllowed(color_type: ColorType, bit_depth: BitDepth) bool {
             return switch (color_type) {
                 .grayscale => switch (bit_depth) {
                     .@"1", .@"2", .@"4", .@"8", .@"16" => true,
@@ -238,39 +237,59 @@ pub const ChunkDataIHDR = struct {
             };
         }
     };
+    pub const BitDepthColorType = enum(u16) {
+        // -- grayscale --
+        @"1_grayscale" = enumValue(.@"1", .grayscale),
+        @"2_grayscale" = enumValue(.@"2", .grayscale),
+        @"4_grayscale" = enumValue(.@"4", .grayscale),
+        @"8_grayscale" = enumValue(.@"8", .grayscale),
+        @"16_grayscale" = enumValue(.@"16", .grayscale),
 
-    pub const BitDepthAndColorType = union(ColorType) {
-        grayscale: Grayscale,
-        rgb: Rgb,
-        palette: Palette,
-        grayscale_alpha: GrayscaleAlpha,
-        rgb_alpha: RgbAlpha,
+        // -- rgb --
+        @"8_rgb" = enumValue(.@"8", .rgb),
+        @"16_rgb" = enumValue(.@"16", .rgb),
 
-        pub const Grayscale = enum(u5) {
-            @"1" = 1,
-            @"2" = 2,
-            @"4" = 4,
-            @"8" = 8,
-            @"16" = 16,
+        // -- palette --
+        @"1_palette" = enumValue(.@"1", .palette),
+        @"2_palette" = enumValue(.@"2", .palette),
+        @"4_palette" = enumValue(.@"4", .palette),
+        @"8_palette" = enumValue(.@"8", .palette),
+
+        // -- grayscale_alpha --
+        @"8_grayscale_alpha" = enumValue(.@"8", .grayscale_alpha),
+        @"16_grayscale_alpha" = enumValue(.@"16", .grayscale_alpha),
+
+        // -- rgb_alpha --
+        @"8_rgb_alpha" = enumValue(.@"8", .rgb_alpha),
+        @"16_rgb_alpha" = enumValue(.@"16", .rgb_alpha),
+
+        pub fn from(bit_depth: BitDepth, color_type: ColorType) BitDepthColorType {
+            return @intToEnum(BitDepthColorType, enumValue(bit_depth, color_type));
+        }
+
+        pub fn bitDepth(bd_and_ct: BitDepthColorType) BitDepth {
+            return @bitCast(BitDepthColorType.Value, @enumToInt(bd_and_ct)).bit_depth;
+        }
+
+        pub fn colorType(bd_and_ct: BitDepthColorType) ColorType {
+            return @bitCast(BitDepthColorType.Value, @enumToInt(bd_and_ct)).color_type;
+        }
+
+        const Value = extern struct {
+            bit_depth: BitDepth align(@alignOf(u8)),
+            color_type: ColorType align(@alignOf(u8)),
+
+            fn toInt(color_type_and_bit_depth_value_bits: Value) u16 {
+                return @bitCast(u16, color_type_and_bit_depth_value_bits);
+            }
         };
-        pub const Rgb = enum(u5) {
-            @"8" = 8,
-            @"16" = 16,
-        };
-        pub const Palette = enum(u5) {
-            @"1" = 1,
-            @"2" = 2,
-            @"4" = 4,
-            @"8" = 8,
-        };
-        pub const GrayscaleAlpha = Rgb;
-        pub const RgbAlpha = Rgb;
-        
-        pub const FromError = error{};
-        pub fn from(bit_depth: BitDepth, color_type: ColorType) FromError!BitDepthAndColorType {
-            return switch (bit_depth) {
-                .@"1" => {},
+        fn enumValue(bit_depth: BitDepth, color_type: ColorType) u16 {
+            std.debug.assert(bit_depth.colorTypeAllowed(color_type));
+            const value = Value{
+                .bit_depth = bit_depth,
+                .color_type = color_type,
             };
+            return value.toInt();
         }
     };
 
@@ -294,8 +313,8 @@ pub const ChunkDataIHDR = struct {
 
         fbs.writer().writeIntBig(u32, ihdr.width) catch unreachable;
         fbs.writer().writeIntBig(u32, ihdr.height) catch unreachable;
-        fbs.writer().writeIntBig(u8, @enumToInt(ihdr.bit_depth)) catch unreachable;
-        fbs.writer().writeIntBig(u8, @enumToInt(ihdr.color_type)) catch unreachable;
+        fbs.writer().writeIntBig(u8, @enumToInt(ihdr.bitDepth())) catch unreachable;
+        fbs.writer().writeIntBig(u8, @enumToInt(ihdr.colorType())) catch unreachable;
         fbs.writer().writeIntBig(u8, @enumToInt(ihdr.compression_method)) catch unreachable;
         fbs.writer().writeIntBig(u8, @enumToInt(ihdr.filter_method)) catch unreachable;
         fbs.writer().writeIntBig(u8, @enumToInt(ihdr.interlace_method)) catch unreachable;
@@ -315,8 +334,33 @@ pub const ChunkDataIHDR = struct {
         filter_method: FilterMethodResult,
         interlace_method: InterlaceMethodResult,
 
-        pub const WidthResult = union(enum) { ok: u31, invalid: u32 };
-        pub const HeightResult = union(enum) { ok: u31, invalid: u32 };
+        const U31RangedResult = union(enum) {
+            /// valid value. Returned as is.
+            ok: u31,
+            /// value was 0. Returned value is implicitly 0.
+            zero,
+            /// value was > std.math.maxInt(u31). Returned value is
+            /// the original value minus std.math.maxInt(u31).
+            overflow: u31,
+            /// Returns the real value of the original integer.
+            pub fn realValue(ranged: U31RangedResult) u32 {
+                return switch (ranged) {
+                    .ok => |value| value,
+                    .zero => 0,
+                    .overflow => |value| @as(u32, value) + std.math.maxInt(u31),
+                };
+            }
+            pub fn fromInt(val: u32) U31RangedResult {
+                const max = std.math.maxInt(u31);
+                return switch (val) {
+                    0 => .zero,
+                    1...max => .{ .ok = @intCast(u31, val) },
+                    max + 1...std.math.maxInt(u32) => .{ .overflow = @intCast(u31, val - max) },
+                };
+            }
+        };
+        pub const WidthResult = U31RangedResult;
+        pub const HeightResult = U31RangedResult;
 
         pub const BitDepthResult = union(enum) { ok: BitDepth, invalid: u8 };
         pub const ColorTypeResult = union(enum) { ok: ColorType, invalid_for_bit_depth: ColorType, invalid: u8 };
@@ -340,19 +384,13 @@ pub const ChunkDataIHDR = struct {
         pub fn unwrap(result: FromBytesResult) UnwrapError!ChunkDataIHDR {
             const width: u31 = switch (result.width) {
                 .ok => |width| width,
-                .invalid => |invalid_width| {
-                    std.debug.assert(invalid_width == 0 or invalid_width > std.math.maxInt(u31));
-                    return error.InvalidWidth;
-                },
+                .zero, .overflow => return error.InvalidWidth,
             };
             std.debug.assert(width > 0);
 
             const height: u31 = switch (result.height) {
                 .ok => |height| height,
-                .invalid => |invalid_height| {
-                    std.debug.assert(invalid_height == 0 or invalid_height > std.math.maxInt(u31));
-                    return error.InvalidHeight;
-                },
+                .zero, .overflow => return error.InvalidHeight,
             };
             std.debug.assert(height > 0);
 
@@ -363,12 +401,12 @@ pub const ChunkDataIHDR = struct {
             const color_type: ColorType = switch (result.color_type) {
                 .ok => |color_type| color_type,
                 .invalid_for_bit_depth => |invalid_color| {
-                    std.debug.assert(!invalid_color.bitDepthEnabled(bit_depth));
+                    std.debug.assert(!invalid_color.bitDepthAllowed(bit_depth));
                     return error.InvalidColorTypeForBitDepth;
                 },
                 .invalid => return error.InvalidColorType,
             };
-            std.debug.assert(color_type.bitDepthEnabled(bit_depth));
+            std.debug.assert(color_type.bitDepthAllowed(bit_depth));
 
             const compression_method: CompressionMethod = switch (result.compression_method) {
                 .ok => |compression_method| compression_method,
@@ -387,8 +425,7 @@ pub const ChunkDataIHDR = struct {
                 .width = width,
                 .height = height,
 
-                .bit_depth = bit_depth,
-                .color_type = color_type,
+                .bit_depth_color_type = BitDepthColorType.from(bit_depth, color_type),
 
                 .compression_method = compression_method,
                 .filter_method = filter_method,
@@ -398,22 +435,8 @@ pub const ChunkDataIHDR = struct {
     };
     pub fn fromBytes(bytes: [13]u8) FromBytesResult {
         var fbs = std.io.fixedBufferStream(bytes[0..]);
-        const width: FromBytesResult.WidthResult = width: {
-            const width_raw: u32 = fbs.reader().readIntBig(u32) catch unreachable;
-            if (width_raw == 0) {
-                break :width .{ .invalid = width_raw };
-            }
-            const width: u31 = std.math.cast(u31, width_raw) orelse break :width .{ .invalid = width_raw };
-            break :width .{ .ok = width };
-        };
-        const height: FromBytesResult.HeightResult = height: {
-            const height_raw: u32 = fbs.reader().readIntBig(u32) catch unreachable;
-            if (height_raw == 0) {
-                break :height .{ .invalid = height_raw };
-            }
-            const height: u31 = std.math.cast(u31, height_raw) orelse break :height .{ .invalid = height_raw };
-            break :height .{ .ok = height };
-        };
+        const width = FromBytesResult.WidthResult.fromInt(fbs.reader().readIntBig(u32) catch unreachable);
+        const height = FromBytesResult.HeightResult.fromInt(fbs.reader().readIntBig(u32) catch unreachable);
 
         const bit_depth: FromBytesResult.BitDepthResult = bit_depth: {
             const bit_depth_raw: u8 = fbs.reader().readIntBig(u8) catch unreachable;
@@ -428,8 +451,11 @@ pub const ChunkDataIHDR = struct {
             const color_type = std.meta.intToEnum(ColorType, color_type_raw) catch |err| switch (err) {
                 error.InvalidEnumTag => break :color_type .{ .invalid = color_type_raw },
             };
-            if (!color_type.bitDepthEnabled(bit_depth)) {
-                break :color_type .{ .invalid_for_bit_depth = color_type };
+            switch (bit_depth) {
+                .ok => |bd| if (!bd.colorTypeAllowed(color_type)) {
+                    break :color_type .{ .invalid_for_bit_depth = color_type };
+                },
+                .invalid => {},
             }
             break :color_type .{ .ok = color_type };
         };
@@ -438,24 +464,24 @@ pub const ChunkDataIHDR = struct {
             const compression_method_raw: u8 = fbs.reader().readIntBig(u8) catch unreachable;
             const compression_method = @intToEnum(CompressionMethod, compression_method_raw);
             break :compression_method switch (compression_method) {
-                .@"0" => .{ .ok = compression_method },
-                _ => .{ .unrecognized = compression_method },
+                .@"0" => FromBytesResult.CompressionMethodResult{ .ok = compression_method },
+                _ => FromBytesResult.CompressionMethodResult{ .unrecognized = compression_method },
             };
         };
         const filter_method: FromBytesResult.FilterMethodResult = filter_method: {
             const filter_method_raw: u8 = fbs.reader().readIntBig(u8) catch unreachable;
             const filter_method = @intToEnum(FilterMethod, filter_method_raw);
             break :filter_method switch (filter_method) {
-                .@"0" => .{ .ok = filter_method },
-                _ => .{ .unrecognized = filter_method },
+                .@"0" => FromBytesResult.FilterMethodResult{ .ok = filter_method },
+                _ => FromBytesResult.FilterMethodResult{ .unrecognized = filter_method },
             };
         };
         const interlace_method: FromBytesResult.InterlaceMethodResult = interlace_method: {
             const interlace_method_raw: u8 = fbs.reader().readIntBig(u8) catch unreachable;
             const interlace_method = @intToEnum(InterlaceMethod, interlace_method_raw);
             break :interlace_method switch (interlace_method) {
-                .none, .adam7 => .{ .ok = interlace_method },
-                _ => .{ .unrecognized = interlace_method },
+                .none, .adam7 => FromBytesResult.InterlaceMethodResult{ .ok = interlace_method },
+                _ => FromBytesResult.InterlaceMethodResult{ .unrecognized = interlace_method },
             };
         };
 
@@ -471,12 +497,27 @@ pub const ChunkDataIHDR = struct {
             .interlace_method = interlace_method,
         };
     }
+
+    pub fn bitDepth(ihdr: ChunkDataIHDR) BitDepth {
+        return ihdr.bit_depth_color_type.bitDepth();
+    }
+    pub fn colorType(ihdr: ChunkDataIHDR) ColorType {
+        return ihdr.bit_depth_color_type.colorType();
+    }
 };
 
 test "ChunkDataIHDR" {
-    _ = ChunkDataIHDR;
-    std.log.warn("\nTODO: test stuff here.", .{});
-    return error.SkipZigTest;
+    var ihdr = ChunkDataIHDR{
+        .width = 100,
+        .height = 100,
+
+        .bit_depth_color_type = .@"1_grayscale",
+
+        .compression_method = .@"0",
+        .filter_method = .@"0",
+        .interlace_method = .none,
+    };
+    try std.testing.expectEqual(ihdr, ChunkDataIHDR.fromBytes(ihdr.toBytes()).unwrap() catch @panic("Something here is definitely wrong"));
 }
 
 pub const ChunkDataPLTE = struct {
