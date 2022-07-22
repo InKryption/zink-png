@@ -263,7 +263,8 @@ pub const ChunkDataIHDR = struct {
         @"8_rgb_alpha" = enumValue(.@"8", .rgb_alpha),
         @"16_rgb_alpha" = enumValue(.@"16", .rgb_alpha),
 
-        pub fn from(bit_depth: BitDepth, color_type: ColorType) BitDepthColorType {
+        pub fn from(bit_depth: BitDepth, color_type: ColorType) ?BitDepthColorType {
+            if (!bit_depth.colorTypeAllowed(color_type)) return null;
             return @intToEnum(BitDepthColorType, enumValue(bit_depth, color_type));
         }
 
@@ -330,9 +331,9 @@ pub const ChunkDataIHDR = struct {
         bit_depth: BitDepthResult,
         color_type: ColorTypeResult,
 
-        compression_method: CompressionMethodResult,
-        filter_method: FilterMethodResult,
-        interlace_method: InterlaceMethodResult,
+        compression_method: CompressionMethod,
+        filter_method: FilterMethod,
+        interlace_method: InterlaceMethod,
 
         const U31RangedResult = union(enum) {
             /// valid value. Returned as is.
@@ -365,10 +366,6 @@ pub const ChunkDataIHDR = struct {
         pub const BitDepthResult = union(enum) { ok: BitDepth, invalid: u8 };
         pub const ColorTypeResult = union(enum) { ok: ColorType, invalid_for_bit_depth: ColorType, invalid: u8 };
 
-        pub const CompressionMethodResult = union(enum) { ok: CompressionMethod, unrecognized: CompressionMethod };
-        pub const FilterMethodResult = union(enum) { ok: FilterMethod, unrecognized: FilterMethod };
-        pub const InterlaceMethodResult = union(enum) { ok: InterlaceMethod, unrecognized: InterlaceMethod };
-
         pub const UnwrapError = error{
             InvalidWidth,
             InvalidHeight,
@@ -376,10 +373,6 @@ pub const ChunkDataIHDR = struct {
             InvalidBitDepth,
             InvalidColorType,
             InvalidColorTypeForBitDepth,
-
-            UnrecognizedCompressionMethod,
-            UnrecognizedFilterMethod,
-            UnrecognizedInterlaceMethod,
         };
         pub fn unwrap(result: FromBytesResult) UnwrapError!ChunkDataIHDR {
             const width: u31 = switch (result.width) {
@@ -408,18 +401,9 @@ pub const ChunkDataIHDR = struct {
             };
             std.debug.assert(color_type.bitDepthAllowed(bit_depth));
 
-            const compression_method: CompressionMethod = switch (result.compression_method) {
-                .ok => |compression_method| compression_method,
-                .unrecognized => return error.UnrecognizedCompressionMethod,
-            };
-            const filter_method: FilterMethod = switch (result.filter_method) {
-                .ok => |filter_method| filter_method,
-                .unrecognized => return error.UnrecognizedFilterMethod,
-            };
-            const interlace_method: InterlaceMethod = switch (result.interlace_method) {
-                .ok => |interlace_method| interlace_method,
-                .unrecognized => return error.UnrecognizedInterlaceMethod,
-            };
+            const compression_method: CompressionMethod = result.compression_method;
+            const filter_method: FilterMethod = result.filter_method;
+            const interlace_method: InterlaceMethod = result.interlace_method;
 
             return ChunkDataIHDR{
                 .width = width,
@@ -435,6 +419,8 @@ pub const ChunkDataIHDR = struct {
     };
     pub fn fromBytes(bytes: [13]u8) FromBytesResult {
         var fbs = std.io.fixedBufferStream(bytes[0..]);
+        defer std.debug.assert(fbs.pos == bytes.len);
+
         const width = FromBytesResult.WidthResult.fromInt(fbs.reader().readIntBig(u32) catch unreachable);
         const height = FromBytesResult.HeightResult.fromInt(fbs.reader().readIntBig(u32) catch unreachable);
 
@@ -460,30 +446,9 @@ pub const ChunkDataIHDR = struct {
             break :color_type .{ .ok = color_type };
         };
 
-        const compression_method: FromBytesResult.CompressionMethodResult = compression_method: {
-            const compression_method_raw: u8 = fbs.reader().readIntBig(u8) catch unreachable;
-            const compression_method = @intToEnum(CompressionMethod, compression_method_raw);
-            break :compression_method switch (compression_method) {
-                .@"0" => FromBytesResult.CompressionMethodResult{ .ok = compression_method },
-                _ => FromBytesResult.CompressionMethodResult{ .unrecognized = compression_method },
-            };
-        };
-        const filter_method: FromBytesResult.FilterMethodResult = filter_method: {
-            const filter_method_raw: u8 = fbs.reader().readIntBig(u8) catch unreachable;
-            const filter_method = @intToEnum(FilterMethod, filter_method_raw);
-            break :filter_method switch (filter_method) {
-                .@"0" => FromBytesResult.FilterMethodResult{ .ok = filter_method },
-                _ => FromBytesResult.FilterMethodResult{ .unrecognized = filter_method },
-            };
-        };
-        const interlace_method: FromBytesResult.InterlaceMethodResult = interlace_method: {
-            const interlace_method_raw: u8 = fbs.reader().readIntBig(u8) catch unreachable;
-            const interlace_method = @intToEnum(InterlaceMethod, interlace_method_raw);
-            break :interlace_method switch (interlace_method) {
-                .none, .adam7 => FromBytesResult.InterlaceMethodResult{ .ok = interlace_method },
-                _ => FromBytesResult.InterlaceMethodResult{ .unrecognized = interlace_method },
-            };
-        };
+        const compression_method = @intToEnum(CompressionMethod, fbs.reader().readIntBig(u8) catch unreachable);
+        const filter_method = @intToEnum(FilterMethod, fbs.reader().readIntBig(u8) catch unreachable);
+        const interlace_method = @intToEnum(InterlaceMethod, fbs.reader().readIntBig(u8) catch unreachable);
 
         return FromBytesResult{
             .width = width,
