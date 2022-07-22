@@ -189,14 +189,19 @@ pub const ChunkDataIHDR = struct {
         @"4" = 4,
         @"8" = 8,
         @"16" = 16,
+
+        pub fn colorTypeAllowed(bit_depth: BitDepth, color_type: ColorType) bool {
+            return color_type.bitDepthEnabled(bit_depth);
+        }
     };
     pub const ColorType = enum(u3) {
         // zig fmt: off
-        grayscale          = 0 + 0 + 0, // 0
-        rgb         = 0 + 2 + 0, // 2
-        palette = 1 + 2 + 0, // 3
-        grayscale_alpha         = 0 + 0 + 4, // 4
-        rgb_alpha   = 0 + 2 + 4, // 6
+        // used:                | palette(1) | color(2) | alpha(4) | value
+        grayscale               = 0          + 0        + 0,      // 0
+        rgb                     = 0          + 2        + 0,      // 2
+        palette                 = 1          + 2        + 0,      // 3
+        grayscale_alpha         = 0          + 0        + 4,      // 4
+        rgb_alpha               = 0          + 2        + 4,      // 6
         // zig fmt: on
 
         pub fn colorEnabled(color_type: ColorType) bool {
@@ -230,6 +235,41 @@ pub const ChunkDataIHDR = struct {
                     .@"1", .@"2", .@"4" => false,
                     .@"8", .@"16" => true,
                 },
+            };
+        }
+    };
+
+    pub const BitDepthAndColorType = union(ColorType) {
+        grayscale: Grayscale,
+        rgb: Rgb,
+        palette: Palette,
+        grayscale_alpha: GrayscaleAlpha,
+        rgb_alpha: RgbAlpha,
+
+        pub const Grayscale = enum(u5) {
+            @"1" = 1,
+            @"2" = 2,
+            @"4" = 4,
+            @"8" = 8,
+            @"16" = 16,
+        };
+        pub const Rgb = enum(u5) {
+            @"8" = 8,
+            @"16" = 16,
+        };
+        pub const Palette = enum(u5) {
+            @"1" = 1,
+            @"2" = 2,
+            @"4" = 4,
+            @"8" = 8,
+        };
+        pub const GrayscaleAlpha = Rgb;
+        pub const RgbAlpha = Rgb;
+        
+        pub const FromError = error{};
+        pub fn from(bit_depth: BitDepth, color_type: ColorType) FromError!BitDepthAndColorType {
+            return switch (bit_depth) {
+                .@"1" => {},
             };
         }
     };
@@ -444,7 +484,7 @@ pub const ChunkDataPLTE = struct {
     count_minus_one: u8,
 
     pub const Entry = extern struct { r: u8, g: u8, b: u8 };
-    pub fn count(plte: ChunkDataPLTE) !std.math.IntFittingRange(1, 256) {
+    pub fn count(plte: ChunkDataPLTE) std.math.IntFittingRange(1, 256) {
         return @as(std.math.IntFittingRange(1, 256), plte.count_minus_one) + 1;
     }
     pub fn entries(plte: *const ChunkDataPLTE) []const Entry {
