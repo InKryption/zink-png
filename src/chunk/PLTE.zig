@@ -1,4 +1,5 @@
 const std = @import("std");
+const chunk = @import("chunk.zig");
 
 const PLTE = @This();
 entries_buf: [256]Entry,
@@ -82,6 +83,14 @@ pub fn fromBytes(bytes: RawBytes) FromBytesResult {
         } },
         else => unreachable,
     };
+}
+
+pub const chunk_type: chunk.Header.Type = .PLTE;
+pub fn calculateCrc(ihdr: PLTE) u32 {
+    var hasher = std.hash.Crc32.init();
+    hasher.hash(&chunk.Header.Type.string(chunk_type));
+    hasher.hash(&ihdr.toBytes());
+    return hasher.final();
 }
 
 test "PLTE" {

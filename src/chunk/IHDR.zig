@@ -1,4 +1,5 @@
 const std = @import("std");
+const chunk = @import("chunk.zig");
 
 const IHDR = @This();
 width: u31 align(@alignOf(u32)),
@@ -308,6 +309,14 @@ pub fn fromBytes(bytes: [13]u8) FromBytesResult {
         .filter_method = filter_method,
         .interlace_method = interlace_method,
     };
+}
+
+pub const chunk_type: chunk.Header.Type = .IHDR;
+pub fn calculateCrc(ihdr: IHDR) u32 {
+    var hasher = std.hash.Crc32.init();
+    hasher.hash(&chunk.Header.Type.string(chunk_type));
+    hasher.hash(&ihdr.toBytes());
+    return hasher.final();
 }
 
 test "IHDR" {
