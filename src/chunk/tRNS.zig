@@ -29,11 +29,9 @@ test "tRNS - color type 3" {
 
 // -- End ColorType.palette (3) --
 
-fn u16MaxByBitDepth(bit_depth: chunk.IHDR.BitDepth) u16 {
-    return std.math.ceilPowerOfTwoPromote(u8, @enumToInt(bit_depth)) - 1;
-}
-fn BitDepthRangedInt(comptime bit_depth: chunk.IHDR.BitDepth) type {
-    return std.math.IntFittingRange(0, u16MaxByBitDepth(bit_depth));
+/// Returns an integer that can hold values starting from 0, and up to `(2^bit_depth)-1`.
+pub fn BitDepthRangedInt(comptime bit_depth: chunk.IHDR.BitDepth) type {
+    return std.math.IntFittingRange(0, std.math.ceilPowerOfTwoPromote(u8, @enumToInt(bit_depth)) - 1);
 }
 
 // -- Start ColorType.grayscale --
