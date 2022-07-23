@@ -4,7 +4,8 @@ const IHDR = @This();
 width: u31 align(@alignOf(u32)),
 height: u31 align(@alignOf(u32)),
 
-bit_depth_color_type: BitDepthColorType align(@alignOf(u16)),
+/// A valid bit depth & color type combination.
+bd_ct: BitDepthColorType align(@alignOf(u16)),
 
 compression_method: CompressionMethod align(@alignOf(u8)),
 filter_method: FilterMethod align(@alignOf(u8)),
@@ -67,64 +68,75 @@ pub const ColorType = enum(u8) {
 };
 pub const BitDepthColorType = enum(u16) {
     // -- grayscale --
-    @"1_grayscale" = enumValue(.@"1", .grayscale),
-    @"2_grayscale" = enumValue(.@"2", .grayscale),
-    @"4_grayscale" = enumValue(.@"4", .grayscale),
-    @"8_grayscale" = enumValue(.@"8", .grayscale),
-    @"16_grayscale" = enumValue(.@"16", .grayscale),
+    @"1_grayscale" = enumMemberValue(.@"1", .grayscale),
+    @"2_grayscale" = enumMemberValue(.@"2", .grayscale),
+    @"4_grayscale" = enumMemberValue(.@"4", .grayscale),
+    @"8_grayscale" = enumMemberValue(.@"8", .grayscale),
+    @"16_grayscale" = enumMemberValue(.@"16", .grayscale),
 
     // -- rgb --
-    @"8_rgb" = enumValue(.@"8", .rgb),
-    @"16_rgb" = enumValue(.@"16", .rgb),
+    @"8_rgb" = enumMemberValue(.@"8", .rgb),
+    @"16_rgb" = enumMemberValue(.@"16", .rgb),
 
     // -- palette --
-    @"1_palette" = enumValue(.@"1", .palette),
-    @"2_palette" = enumValue(.@"2", .palette),
-    @"4_palette" = enumValue(.@"4", .palette),
-    @"8_palette" = enumValue(.@"8", .palette),
+    @"1_palette" = enumMemberValue(.@"1", .palette),
+    @"2_palette" = enumMemberValue(.@"2", .palette),
+    @"4_palette" = enumMemberValue(.@"4", .palette),
+    @"8_palette" = enumMemberValue(.@"8", .palette),
 
     // -- grayscale_alpha --
-    @"8_grayscale_alpha" = enumValue(.@"8", .grayscale_alpha),
-    @"16_grayscale_alpha" = enumValue(.@"16", .grayscale_alpha),
+    @"8_grayscale_alpha" = enumMemberValue(.@"8", .grayscale_alpha),
+    @"16_grayscale_alpha" = enumMemberValue(.@"16", .grayscale_alpha),
 
     // -- rgb_alpha --
-    @"8_rgb_alpha" = enumValue(.@"8", .rgb_alpha),
-    @"16_rgb_alpha" = enumValue(.@"16", .rgb_alpha),
+    @"8_rgb_alpha" = enumMemberValue(.@"8", .rgb_alpha),
+    @"16_rgb_alpha" = enumMemberValue(.@"16", .rgb_alpha),
 
     pub fn from(bit_depth: BitDepth, color_type: ColorType) ?BitDepthColorType {
         if (!bit_depth.colorTypeAllowed(color_type)) return null;
-        return @intToEnum(BitDepthColorType, enumValue(bit_depth, color_type));
+        return @intToEnum(BitDepthColorType, enumMemberValue(bit_depth, color_type));
     }
 
-    pub fn bitDepth(bd_and_ct: BitDepthColorType) BitDepth {
-        return @bitCast(BitDepthColorType.Value, @enumToInt(bd_and_ct)).bit_depth;
+    pub fn bitDepth(bd_ct: BitDepthColorType) BitDepth {
+        return bd_ct.values().bd;
     }
-    pub fn bitDepthPtr(bd_and_ct: *BitDepthColorType) *BitDepth {
-        return &std.mem.bytesAsValue(Value, std.mem.asBytes(bd_and_ct)).bit_depth;
-    }
-
-    pub fn colorType(bd_and_ct: BitDepthColorType) ColorType {
-        return @bitCast(BitDepthColorType.Value, @enumToInt(bd_and_ct)).color_type;
-    }
-    pub fn colorTypePtr(bd_and_ct: *BitDepthColorType) *BitDepth {
-        return &std.mem.bytesAsValue(Value, std.mem.asBytes(bd_and_ct)).color_type;
+    pub fn bitDepthPtr(bd_ct: *BitDepthColorType) *BitDepth {
+        return &bd_ct.values().valuesPtr().bd;
     }
 
-    const Value = extern struct {
-        bit_depth: BitDepth align(@alignOf(u8)),
-        color_type: ColorType align(@alignOf(u8)),
+    pub fn colorType(bd_ct: BitDepthColorType) ColorType {
+        return bd_ct.values().ct;
+    }
+    pub fn colorTypePtr(bd_ct: *BitDepthColorType) *ColorType {
+        return &bd_ct.valuesPtr().ct;
+    }
 
-        fn toInt(color_type_and_bit_depth_value_bits: Value) u16 {
-            return @bitCast(u16, color_type_and_bit_depth_value_bits);
-        }
-    };
-    fn enumValue(bit_depth: BitDepth, color_type: ColorType) u16 {
+    const Values = packed struct { bd: BitDepth, ct: ColorType };
+    fn enumMemberValue(bit_depth: BitDepth, color_type: ColorType) u16 {
         std.debug.assert(bit_depth.colorTypeAllowed(color_type));
-        const value = Value{
-            .bit_depth = bit_depth,
-            .color_type = color_type,
+        return @bitCast(u16, Values{
+            .bd = bit_depth,
+            .ct = color_type,
+        });
+    }
+    fn valuesPtr(bd_ct: *BitDepthColorType) *align(@alignOf(BitDepthColorType)) Values {
+        return std.mem.bytesAsValue(Values, std.mem.asBytes(bd_ct));
+    }
+    fn values(bd_ct: BitDepthColorType) Values {
+        return @bitCast(Values, bd_ct);
+    }
+
+    // Just some assertions that allow for some assumptions.
+    comptime {
+        const vals = BitDepthColorType.Values{
+            .bd = .@"16",
+            .ct = .rgb_alpha,
         };
-        return value.toInt();
+        std.debug.assert(@enumToInt(vals.bd) != @enumToInt(vals.ct));
+
+        const vals_bytes: [2]u8 align(@alignOf(u16)) = @bitCast([2]u8, vals);
+        std.debug.assert(vals_bytes[0] == @enumToInt(vals.bd));
+        std.debug.assert(vals_bytes[1] == @enumToInt(vals.ct));
     }
 };
 
@@ -148,8 +160,8 @@ pub fn toBytes(ihdr: IHDR) [13]u8 {
 
     fbs.writer().writeIntBig(u32, ihdr.width) catch unreachable;
     fbs.writer().writeIntBig(u32, ihdr.height) catch unreachable;
-    fbs.writer().writeIntBig(u8, @enumToInt(ihdr.bitDepth())) catch unreachable;
-    fbs.writer().writeIntBig(u8, @enumToInt(ihdr.colorType())) catch unreachable;
+    fbs.writer().writeIntBig(u8, @enumToInt(ihdr.bd_ct.bitDepth())) catch unreachable;
+    fbs.writer().writeIntBig(u8, @enumToInt(ihdr.bd_ct.colorType())) catch unreachable;
     fbs.writer().writeIntBig(u8, @enumToInt(ihdr.compression_method)) catch unreachable;
     fbs.writer().writeIntBig(u8, @enumToInt(ihdr.filter_method)) catch unreachable;
     fbs.writer().writeIntBig(u8, @enumToInt(ihdr.interlace_method)) catch unreachable;
@@ -175,22 +187,23 @@ pub const FromBytesResult = struct {
         /// value was 0. Returned value is implicitly 0.
         zero,
         /// value was > std.math.maxInt(u31). Returned value is
-        /// the original value minus std.math.maxInt(u31).
+        /// the original value - (std.math.maxInt(u31) + 1).
         overflow: u31,
+
+        const max = std.math.maxInt(u31);
         /// Returns the real value of the original integer.
         pub fn realValue(ranged: U31RangedResult) u32 {
             return switch (ranged) {
                 .ok => |value| value,
                 .zero => 0,
-                .overflow => |value| @as(u32, value) + std.math.maxInt(u31),
+                .overflow => |value| @as(u32, value) + (max + 1),
             };
         }
         pub fn fromInt(val: u32) U31RangedResult {
-            const max = std.math.maxInt(u31);
             return switch (val) {
                 0 => .zero,
                 1...max => .{ .ok = @intCast(u31, val) },
-                max + 1...std.math.maxInt(u32) => .{ .overflow = @intCast(u31, val - max) },
+                max + 1...std.math.maxInt(u32) => .{ .overflow = @intCast(u31, val - (max + 1)) },
             };
         }
     };
@@ -243,7 +256,7 @@ pub const FromBytesResult = struct {
             .width = width,
             .height = height,
 
-            .bit_depth_color_type = BitDepthColorType.from(bit_depth, color_type).?,
+            .bd_ct = BitDepthColorType.from(bit_depth, color_type).?,
 
             .compression_method = compression_method,
             .filter_method = filter_method,
@@ -297,25 +310,12 @@ pub fn fromBytes(bytes: [13]u8) FromBytesResult {
     };
 }
 
-pub fn bitDepth(ihdr: IHDR) BitDepth {
-    return ihdr.bit_depth_color_type.bitDepth();
-}
-pub fn bitDepthPtr(ihdr: *IHDR) *BitDepth {
-    return ihdr.bit_depth_color_type.bitDepthPtr();
-}
-pub fn colorType(ihdr: IHDR) ColorType {
-    return ihdr.bit_depth_color_type.colorType();
-}
-pub fn colorTypePtr(ihdr: *IHDR) *ColorType {
-    ihdr.bit_depth_color_type.colorTypePtr();
-}
-
 test "IHDR" {
     const ihdr = IHDR{
         .width = 100,
         .height = 100,
 
-        .bit_depth_color_type = .@"1_grayscale",
+        .bd_ct = .@"1_grayscale",
 
         .compression_method = .@"0",
         .filter_method = .@"0",
@@ -323,35 +323,24 @@ test "IHDR" {
     };
     try std.testing.expectEqual(ihdr, IHDR.fromBytes(ihdr.toBytes()).unwrap() catch @panic("Something here is definitely wrong"));
 
-    var wrong_bytes = ihdr.toBytes();
-    const width: *align(@alignOf(u8)) u32 = std.mem.bytesAsValue(u32, wrong_bytes[0..][0..4]);
-    const height: *align(@alignOf(u8)) u32 = std.mem.bytesAsValue(u32, wrong_bytes[4..][0..4]);
-    const bit_depth: *align(@alignOf(u8)) u8 = std.mem.bytesAsValue(u8, wrong_bytes[8..][0..1]);
-    const color_type: *align(@alignOf(u8)) u8 = std.mem.bytesAsValue(u8, wrong_bytes[9..][0..1]);
+    var wrong_bytes align(@alignOf(IHDR)) = ihdr.toBytes();
+    std.mem.bytesAsValue(u32, wrong_bytes[0..][0..4]).* = std.math.maxInt(u32);
+    std.mem.bytesAsValue(u32, wrong_bytes[4..][0..4]).* = 0;
+    std.mem.bytesAsValue(u8, wrong_bytes[8..][0..1]).* = std.math.maxInt(u8);
+    std.mem.bytesAsValue(u8, wrong_bytes[9..][0..1]).* = std.math.maxInt(u8);
+    std.mem.bytesAsValue(u8, wrong_bytes[10..][0..1]).* = std.math.maxInt(u8);
+    std.mem.bytesAsValue(u8, wrong_bytes[11..][0..1]).* = std.math.maxInt(u8);
+    std.mem.bytesAsValue(u8, wrong_bytes[12..][0..1]).* = std.math.maxInt(u8);
 
-    width.* = 0;
-    try std.testing.expectError(error.InvalidWidth, IHDR.fromBytes(wrong_bytes).unwrap());
+    try std.testing.expectEqual(IHDR.FromBytesResult{
+        .width = .{ .overflow = std.math.maxInt(u32) - (std.math.maxInt(u31) + 1) },
+        .height = .zero,
 
-    width.* = std.mem.nativeToBig(u32, ihdr.width);
-    height.* = 0;
-    try std.testing.expectError(error.InvalidHeight, IHDR.fromBytes(wrong_bytes).unwrap());
+        .bit_depth = .{ .invalid = std.math.maxInt(u8) },
+        .color_type = .{ .invalid = std.math.maxInt(u8) },
 
-    height.* = std.mem.nativeToBig(u32, ihdr.height);
-    bit_depth.* = std.mem.nativeToBig(u8, std.math.maxInt(u8));
-    try std.testing.expectError(error.InvalidBitDepth, IHDR.fromBytes(wrong_bytes).unwrap());
-
-    bit_depth.* = std.mem.nativeToBig(u8, @enumToInt(ihdr.bitDepth()));
-    color_type.* = std.mem.nativeToBig(u8, std.math.maxInt(u8));
-    try std.testing.expectError(error.InvalidColorType, IHDR.fromBytes(wrong_bytes).unwrap());
-
-    try std.testing.expectEqual(
-        @as(?IHDR.BitDepthColorType, null),
-        IHDR.BitDepthColorType.from(ihdr.bitDepth(), .rgb),
-    );
-
-    color_type.* = std.mem.nativeToBig(u8, @enumToInt(IHDR.ColorType.rgb));
-    try std.testing.expectError(error.InvalidColorTypeForBitDepth, IHDR.fromBytes(wrong_bytes).unwrap());
-
-    color_type.* = std.mem.nativeToBig(u8, @enumToInt(ihdr.colorType()));
-    try std.testing.expectEqual(ihdr, IHDR.fromBytes(wrong_bytes).unwrap() catch @panic("Welp, something wrong here."));
+        .compression_method = @intToEnum(CompressionMethod, std.math.maxInt(u8)),
+        .filter_method = @intToEnum(FilterMethod, std.math.maxInt(u8)),
+        .interlace_method = @intToEnum(InterlaceMethod, std.math.maxInt(u8)),
+    }, IHDR.fromBytes(wrong_bytes));
 }
