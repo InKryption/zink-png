@@ -22,14 +22,14 @@ pub const BitDepth = enum(u8) {
     }
 };
 pub const ColorType = enum(u8) {
+    // used:                | palette(1) | color(2) | alpha(4) | value
     // zig fmt: off
-        // used:                | palette(1) | color(2) | alpha(4) | value
-        grayscale               =         0  +       0  +       0,      // 0
-        rgb                     =         0  +       2  +       0,      // 2
-        palette                 =         1  +       2  +       0,      // 3
-        grayscale_alpha         =         0  +       0  +       4,      // 4
-        rgb_alpha               =         0  +       2  +       4,      // 6
-        // zig fmt: on
+    grayscale               =         0  +       0  +       0,      // 0
+    rgb                     =         0  +       2  +       0,      // 2
+    palette                 =         1  +       2  +       0,      // 3
+    grayscale_alpha         =         0  +       0  +       4,      // 4
+    rgb_alpha               =         0  +       2  +       4,      // 6
+    // zig fmt: on
 
     pub fn colorEnabled(color_type: ColorType) bool {
         return @enumToInt(color_type) & 2 != 0;
