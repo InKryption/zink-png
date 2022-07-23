@@ -37,6 +37,18 @@ pub const FromBytesResult = union(enum) {
         trailing: Trailing,
         pub const Trailing = struct { r: u8 };
     };
+
+    pub const UnwrapError = error{
+        MissingOneByte,
+        MissingTwoBytes,
+    };
+    pub fn unwrap(result: FromBytesResult) UnwrapError!PLTE {
+        return switch (result) {
+            .ok => |value| value,
+            .missing_one_byte => error.MissingOneByte,
+            .missing_two_bytes => error.MissingTwoBytes,
+        };
+    }
 };
 /// Asserts `bytes.len > 0`.
 pub fn fromBytes(bytes: RawBytes) FromBytesResult {
@@ -58,14 +70,14 @@ pub fn fromBytes(bytes: RawBytes) FromBytesResult {
             .count_minus_one = @intCast(u8, result_entries.len - 1),
         } },
         1 => FromBytesResult{ .missing_one_byte = FromBytesResult.MissingOneByte{
-            .full = std.BoundedArray(Entry, 255).fromSlice(entries.constSlice()) catch unreachable,
+            .full = std.BoundedArray(Entry, 255).fromSlice(result_entries.constSlice()) catch unreachable,
             .trailing = .{
                 .r = bytes.get(bytes.len - 2),
                 .g = bytes.get(bytes.len - 1),
             },
         } },
         2 => FromBytesResult{ .missing_two_bytes = FromBytesResult.MissingTwoBytes{
-            .full = std.BoundedArray(Entry, 255).fromSlice(entries.constSlice()) catch unreachable,
+            .full = std.BoundedArray(Entry, 255).fromSlice(result_entries.constSlice()) catch unreachable,
             .trailing = .{
                 .r = bytes.get(bytes.len - 1),
             },
@@ -75,7 +87,16 @@ pub fn fromBytes(bytes: RawBytes) FromBytesResult {
 }
 
 test "PLTE" {
-    _ = PLTE;
-    std.log.warn("\nTODO: test stuff here.", .{});
-    return error.SkipZigTest;
+    var plte = comptime PLTE.fromBytes(PLTE.RawBytes.fromSlice(std.mem.asBytes(&[_][3]u8{
+        //  r    g    b
+        .{ 000, 000, 000 },
+        .{ 255, 000, 000 },
+        .{ 000, 255, 000 },
+        .{ 000, 000, 255 },
+        .{ 000, 255, 255 },
+        .{ 255, 000, 255 },
+        .{ 255, 255, 000 },
+        .{ 255, 255, 255 },
+    })) catch @panic("Oof, didn't meant to do that")).ok;
+    try std.testing.expectEqual(plte, PLTE.fromBytes(plte.toBytes()).unwrap() catch @panic("Something went wrong there."));
 }
