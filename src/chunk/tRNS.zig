@@ -2,6 +2,8 @@ const std = @import("std");
 const png = @import("../main.zig");
 const chunk = png.chunk;
 
+// -- Start ColorType.palette (3) --
+
 /// Represents the alpha channels corresponding
 /// to the palette entries stored in the tRNS chunk when an image
 /// has a color type 3 (png.chunk.IHDR.ColorType.palette).
@@ -25,6 +27,8 @@ test "tRNS - color type 3" {
     return error.SkipZigTest;
 }
 
+// -- End ColorType.palette (3) --
+
 fn u16MaxByBitDepth(bit_depth: chunk.IHDR.BitDepth) u16 {
     return std.math.ceilPowerOfTwoPromote(u8, @enumToInt(bit_depth)) - 1;
 }
@@ -32,7 +36,9 @@ fn BitDepthRangedInt(comptime bit_depth: chunk.IHDR.BitDepth) type {
     return std.math.IntFittingRange(0, u16MaxByBitDepth(bit_depth));
 }
 
-/// Represents the gray level value stored in the tRNS
+// -- Start ColorType.grayscale --
+
+/// Represents the gray level value stored in the tRNS chunk
 /// when an image has a color type 0 (png.chunk.IHDR.ColorType.grayscale).
 /// The tag corresponds to the bit depth given in the IHDR chunk.
 pub const GrayLevel = union(chunk.IHDR.BitDepth) {
@@ -73,6 +79,13 @@ test "tRNS - color type 0" {
     return error.SkipZigTest;
 }
 
+// -- End ColorType.grayscale --
+
+// -- Start ColorType.truecolor (2) --
+
+/// Represents the rgb level values stored in the tRNS chunk
+/// when an image has a color type 2 (png.chunk.IHDR.ColorType.truecolor).
+/// The tag corresponds to the bit depth given in the IHDR chunk.
 pub const ColorLevels = union(chunk.IHDR.BitDepth) {
     bd1: Rgb(.bd1),
     bd2: Rgb(.bd2),
@@ -147,3 +160,5 @@ test "tRNS - color type 2" {
     std.log.warn("TODO: Add actual testing here", .{});
     return error.SkipZigTest;
 }
+
+// -- End ColorType.truecolor (2) --

@@ -24,13 +24,13 @@ pub const BitDepth = enum(u8) {
     }
 };
 pub const ColorType = enum(u8) {
-    // used:                | palette(1) | color(2) | alpha(4) | value
+    // used:        | palette(1) | color(2) | alpha(4) | value
     // zig fmt: off
-    grayscale               =         0  +       0  +       0,      // 0
-    rgb                     =         0  +       2  +       0,      // 2
-    palette                 =         1  +       2  +       0,      // 3
-    grayscale_alpha         =         0  +       0  +       4,      // 4
-    rgb_alpha               =         0  +       2  +       4,      // 6
+    grayscale       =         0  +       0  +       0, // 0
+    truecolor       =         0  +       2  +       0, // 2
+    palette         =         1  +       2  +       0, // 3
+    grayscale_alpha =         0  +       0  +       4, // 4
+    rgba            =         0  +       2  +       4, // 6
     // zig fmt: on
 
     pub fn colorEnabled(color_type: ColorType) bool {
@@ -48,7 +48,7 @@ pub const ColorType = enum(u8) {
             .grayscale => switch (bit_depth) {
                 .bd1, .bd2, .bd4, .bd8, .bd16 => true,
             },
-            .rgb => switch (bit_depth) {
+            .truecolor => switch (bit_depth) {
                 .bd1, .bd2, .bd4 => false,
                 .bd8, .bd16 => true,
             },
@@ -60,7 +60,7 @@ pub const ColorType = enum(u8) {
                 .bd1, .bd2, .bd4 => false,
                 .bd8, .bd16 => true,
             },
-            .rgb_alpha => switch (bit_depth) {
+            .rgba => switch (bit_depth) {
                 .bd1, .bd2, .bd4 => false,
                 .bd8, .bd16 => true,
             },
@@ -75,9 +75,9 @@ pub const BitDepthColorType = enum(u16) {
     bd8_grayscale = enumMemberValue(.bd8, .grayscale),
     bd16_grayscale = enumMemberValue(.bd16, .grayscale),
 
-    // -- rgb --
-    bd8_rgb = enumMemberValue(.bd8, .rgb),
-    bd16_rgb = enumMemberValue(.bd16, .rgb),
+    // -- truecolor --
+    bd8_truecolor = enumMemberValue(.bd8, .truecolor),
+    bd16_truecolor = enumMemberValue(.bd16, .truecolor),
 
     // -- palette --
     bd1_palette = enumMemberValue(.bd1, .palette),
@@ -89,9 +89,9 @@ pub const BitDepthColorType = enum(u16) {
     bd8_grayscale_alpha = enumMemberValue(.bd8, .grayscale_alpha),
     bd16_grayscale_alpha = enumMemberValue(.bd16, .grayscale_alpha),
 
-    // -- rgb_alpha --
-    bd8_rgb_alpha = enumMemberValue(.bd8, .rgb_alpha),
-    bd16_rgb_alpha = enumMemberValue(.bd16, .rgb_alpha),
+    // -- rgba --
+    bd8_rgba = enumMemberValue(.bd8, .rgba),
+    bd16_rgba = enumMemberValue(.bd16, .rgba),
 
     pub fn from(bit_depth: BitDepth, color_type: ColorType) ?BitDepthColorType {
         if (!bit_depth.colorTypeAllowed(color_type)) return null;
@@ -131,7 +131,7 @@ pub const BitDepthColorType = enum(u16) {
     comptime {
         const vals = BitDepthColorType.Values{
             .bd = .bd16,
-            .ct = .rgb_alpha,
+            .ct = .rgba,
         };
         std.debug.assert(@enumToInt(vals.bd) != @enumToInt(vals.ct));
 
