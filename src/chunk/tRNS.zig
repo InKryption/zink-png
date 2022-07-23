@@ -12,7 +12,7 @@ pub const AlphaChannelEntries = std.BoundedArray(u8, 256);
 /// Returns null if `plte.count() < plte_alphas.len`. Otherwise returns
 /// a bounded array consisting of the alpha channel values present in `plte_alphas`, followed
 /// by `plte.count() - plte_alphas.len` alpha channel values, all equal to `std.math.maxInt(u8)`.
-pub fn fullCorrespondingAlphaChannels(plte: chunk.PLTE, plte_alphas: AlphaChannelEntries) ?AlphaChannelEntries {
+pub fn fullCorrespondingAlphaChannels(plte: chunk.PLTE.ChunkData, plte_alphas: AlphaChannelEntries) ?AlphaChannelEntries {
     if (plte.count() < plte_alphas.len) return null;
 
     var result: AlphaChannelEntries = plte_alphas;
