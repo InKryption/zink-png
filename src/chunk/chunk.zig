@@ -3,6 +3,7 @@ const std = @import("std");
 pub const Header = @import("Header.zig");
 pub const IHDR = @import("IHDR.zig");
 pub const PLTE = @import("PLTE.zig");
+pub const tRNS = @import("tRNS.zig");
 
 pub const Type = enum(u32) {
     pub const Tag = @typeInfo(Type).Enum.tag_type;
@@ -80,4 +81,5 @@ comptime {
     _ = Type;
     _ = IHDR;
     _ = PLTE;
+    _ = tRNS;
 }

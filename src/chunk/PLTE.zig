@@ -9,6 +9,7 @@ count_minus_one: u8,
 /// g: entry[1]
 /// b: entry[2]
 pub const Entry = [3]u8;
+
 pub fn count(plte: PLTE) std.math.IntFittingRange(1, 256) {
     return @as(std.math.IntFittingRange(1, 256), plte.count_minus_one) + 1;
 }

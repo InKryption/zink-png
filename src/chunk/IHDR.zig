@@ -13,11 +13,11 @@ filter_method: FilterMethod align(@alignOf(u8)),
 interlace_method: InterlaceMethod align(@alignOf(u8)),
 
 pub const BitDepth = enum(u8) {
-    @"1" = 1,
-    @"2" = 2,
-    @"4" = 4,
-    @"8" = 8,
-    @"16" = 16,
+    bd1 = 1,
+    bd2 = 2,
+    bd4 = 4,
+    bd8 = 8,
+    bd16 = 16,
 
     pub fn colorTypeAllowed(bit_depth: BitDepth, color_type: ColorType) bool {
         return color_type.bitDepthAllowed(bit_depth);
@@ -46,52 +46,52 @@ pub const ColorType = enum(u8) {
     pub fn bitDepthAllowed(color_type: ColorType, bit_depth: BitDepth) bool {
         return switch (color_type) {
             .grayscale => switch (bit_depth) {
-                .@"1", .@"2", .@"4", .@"8", .@"16" => true,
+                .bd1, .bd2, .bd4, .bd8, .bd16 => true,
             },
             .rgb => switch (bit_depth) {
-                .@"1", .@"2", .@"4" => false,
-                .@"8", .@"16" => true,
+                .bd1, .bd2, .bd4 => false,
+                .bd8, .bd16 => true,
             },
             .palette => switch (bit_depth) {
-                .@"1", .@"2", .@"4", .@"8" => true,
-                .@"16" => false,
+                .bd1, .bd2, .bd4, .bd8 => true,
+                .bd16 => false,
             },
             .grayscale_alpha => switch (bit_depth) {
-                .@"1", .@"2", .@"4" => false,
-                .@"8", .@"16" => true,
+                .bd1, .bd2, .bd4 => false,
+                .bd8, .bd16 => true,
             },
             .rgb_alpha => switch (bit_depth) {
-                .@"1", .@"2", .@"4" => false,
-                .@"8", .@"16" => true,
+                .bd1, .bd2, .bd4 => false,
+                .bd8, .bd16 => true,
             },
         };
     }
 };
 pub const BitDepthColorType = enum(u16) {
     // -- grayscale --
-    @"1_grayscale" = enumMemberValue(.@"1", .grayscale),
-    @"2_grayscale" = enumMemberValue(.@"2", .grayscale),
-    @"4_grayscale" = enumMemberValue(.@"4", .grayscale),
-    @"8_grayscale" = enumMemberValue(.@"8", .grayscale),
-    @"16_grayscale" = enumMemberValue(.@"16", .grayscale),
+    bd1_grayscale = enumMemberValue(.bd1, .grayscale),
+    bd2_grayscale = enumMemberValue(.bd2, .grayscale),
+    bd4_grayscale = enumMemberValue(.bd4, .grayscale),
+    bd8_grayscale = enumMemberValue(.bd8, .grayscale),
+    bd16_grayscale = enumMemberValue(.bd16, .grayscale),
 
     // -- rgb --
-    @"8_rgb" = enumMemberValue(.@"8", .rgb),
-    @"16_rgb" = enumMemberValue(.@"16", .rgb),
+    bd8_rgb = enumMemberValue(.bd8, .rgb),
+    bd16_rgb = enumMemberValue(.bd16, .rgb),
 
     // -- palette --
-    @"1_palette" = enumMemberValue(.@"1", .palette),
-    @"2_palette" = enumMemberValue(.@"2", .palette),
-    @"4_palette" = enumMemberValue(.@"4", .palette),
-    @"8_palette" = enumMemberValue(.@"8", .palette),
+    bd1_palette = enumMemberValue(.bd1, .palette),
+    bd2_palette = enumMemberValue(.bd2, .palette),
+    bd4_palette = enumMemberValue(.bd4, .palette),
+    bd8_palette = enumMemberValue(.bd8, .palette),
 
     // -- grayscale_alpha --
-    @"8_grayscale_alpha" = enumMemberValue(.@"8", .grayscale_alpha),
-    @"16_grayscale_alpha" = enumMemberValue(.@"16", .grayscale_alpha),
+    bd8_grayscale_alpha = enumMemberValue(.bd8, .grayscale_alpha),
+    bd16_grayscale_alpha = enumMemberValue(.bd16, .grayscale_alpha),
 
     // -- rgb_alpha --
-    @"8_rgb_alpha" = enumMemberValue(.@"8", .rgb_alpha),
-    @"16_rgb_alpha" = enumMemberValue(.@"16", .rgb_alpha),
+    bd8_rgb_alpha = enumMemberValue(.bd8, .rgb_alpha),
+    bd16_rgb_alpha = enumMemberValue(.bd16, .rgb_alpha),
 
     pub fn from(bit_depth: BitDepth, color_type: ColorType) ?BitDepthColorType {
         if (!bit_depth.colorTypeAllowed(color_type)) return null;
@@ -130,7 +130,7 @@ pub const BitDepthColorType = enum(u16) {
     // Just some assertions that allow for some assumptions.
     comptime {
         const vals = BitDepthColorType.Values{
-            .bd = .@"16",
+            .bd = .bd16,
             .ct = .rgb_alpha,
         };
         std.debug.assert(@enumToInt(vals.bd) != @enumToInt(vals.ct));
@@ -324,7 +324,7 @@ test "IHDR" {
         .width = 100,
         .height = 100,
 
-        .bd_ct = .@"1_grayscale",
+        .bd_ct = .bd1_grayscale,
 
         .compression_method = .@"0",
         .filter_method = .@"0",
