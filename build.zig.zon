@@ -1,0 +1,5 @@
+.{
+    .name = "zink-png",
+    .version = "0.1.0",
+    .depdendencies = .{},
+}
