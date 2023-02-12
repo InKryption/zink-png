@@ -1079,7 +1079,7 @@ pub const iCCP = struct {
         /// The index in `name` at which the error occurred, if an error occured.
         index: *usize,
     ) ValidateNameError!void {
-        @call(.always_inline, validateNameTemplate, .{ name, true, index });
+        return @call(.always_inline, validateNameTemplate, .{ name, true, index });
     }
     fn validateNameTemplate(
         name: []const u8,
@@ -1161,6 +1161,20 @@ test iCCP {
     try std.testing.expectEqualStrings(maybe_name.ok.constSlice(), "foo bar");
 
     try std.testing.expectEqual(@as(?iCCP.CompressionMethod, .method_0), iCCP.CompressionMethod.fromByte(try fbr.readByte()));
+
+    var index: usize = undefined;
+
+    try std.testing.expectError(error.InvalidChar, iCCP.validateNameIndex(&[_]u8{ 'f', 'o', 'o', ' ', 'b', 0, 'r' }, &index));
+    try std.testing.expectEqual(@as(usize, 5), index);
+
+    try std.testing.expectError(error.ConsecutiveSpace, iCCP.validateNameIndex(&[_]u8{ 'f', 'o', 'o', ' ', ' ', 'b', 'r' }, &index));
+    try std.testing.expectEqual(@as(usize, 4), index);
+
+    try std.testing.expectError(error.LeadingSpace, iCCP.validateNameIndex(&[_]u8{ ' ', ' ', ' ', 'b' }, &index));
+    try std.testing.expectEqual(@as(usize, 0), index);
+
+    try std.testing.expectError(error.TrailingSpace, iCCP.validateNameIndex(&[_]u8{ 'b', 'o', 'c', 'a', 'd', 'i', ' ' }, &index));
+    try std.testing.expectEqual(@as(usize, 6), index);
 }
 
 /// Returns a formatter for a Latin-1 string.
