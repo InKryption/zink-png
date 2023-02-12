@@ -5,17 +5,22 @@ const basic_png = @embedFile("basic.png");
 
 fn expectChunkData(
     chunk_iter: anytype,
-    expected_header: png.ChunkHeader,
+    expected_header: ?png.ChunkHeader,
     expected_data: []const u8,
 ) !void {
     const data_reader = chunk_iter.dataReader();
+    if (expected_header == null) {
+        std.debug.assert(expected_data.len == 0);
+    }
 
     const actual_header: png.ChunkHeader = blk: {
         var next_result: png.ChunkIteratorNextResult = undefined;
-        chunk_iter.nextAdvanced(&next_result) catch |err| switch (err) {}; // handle read errors
+        try chunk_iter.nextAdvanced(&next_result); // handle read errors
         const maybe_header = try next_result.unwrap();
-        break :blk maybe_header orelse return;
+        break :blk maybe_header orelse
+            return if (expected_header != null) error.NoHeader;
     };
+
     try std.testing.expectEqual(expected_header, actual_header);
     try std.testing.expect(try data_reader.isBytes(expected_data));
     try std.testing.expectEqual(@as(usize, 0), (try data_reader.readBoundedBytes(1)).len);
@@ -49,7 +54,13 @@ test {
         // the data_reader, fetch the CRC code.
         if (!try iter.fetchExpectedCrc()) return error.FailedToFetchExpectedCrc;
 
-        const real_expected_crc = std.hash.Crc32.hash(chunk_data);
+        const real_expected_crc: u32 = blk: {
+            var hasher = std.hash.Crc32.init();
+            hasher.update(&header.type.string());
+            hasher.update(chunk_data);
+            break :blk hasher.final();
+        };
+
         const expected_crc = iter.getExpectedCrc();
         const actual_crc = iter.getActualCrc();
 
@@ -100,9 +111,6 @@ test {
             44,  227, 3,   158, 1,   165, 239, 125, 121, 51,  177,
         },
     );
-    try expectChunkData(
-        &iter,
-        .{ .type = .IEND, .length = 0 },
-        &[0]u8{},
-    );
+    try expectChunkData(&iter, .{ .type = .IEND, .length = 0 }, &.{});
+    try expectChunkData(&iter, null, &.{});
 }

@@ -133,7 +133,7 @@ test ChunkType {
 
 pub fn ChunkIterator(
     comptime ReaderType: type,
-    /// Enables hashing the CRC code.
+    /// Enables calculating the CRC code.
     comptime calculate_crc: bool,
 ) type {
     return struct {
@@ -149,6 +149,7 @@ pub fn ChunkIterator(
             end,
             expecting_header,
             exhausting_data,
+            got_expected_crc,
         };
 
         pub const SignatureCheck = ChunkIteratorSignatureCheck;
@@ -167,7 +168,11 @@ pub fn ChunkIterator(
         pub fn checkSignatureAdvanced(iter: *Self, out: *SignatureCheck) Inner.Error!void {
             switch (iter.state) {
                 .start => {},
-                else => unreachable,
+                .end,
+                .expecting_header,
+                .exhausting_data,
+                .got_expected_crc,
+                => unreachable,
             }
 
             out.* = undefined;
@@ -221,23 +226,31 @@ pub fn ChunkIterator(
                 .expecting_header => {
                     assert(iter.expected_crc == null);
                 },
-                .exhausting_data => {
-                    assert(iter.remaining_bytes == 0); // caller is meant to exhaust the stream returned by `.dataReader()`
-                    assert(iter.expected_crc != null); // caller is meant to first call `.fetchExpectedCrc()`
+                .exhausting_data => unreachable, // supposed to call meant to call `fetchExpectedCrc` first.
+                .got_expected_crc => {
+                    assert(iter.remaining_bytes == 0);
+                    assert(iter.expected_crc != null);
                     iter.remaining_bytes = undefined;
                     iter.expected_crc = null;
-                    iter.state = .expecting_header;
                 },
             }
 
             var bytes: std.BoundedArray(u8, 8) = .{};
             iter.inner.readIntoBoundedBytes(8, &bytes) catch |err| {
-                out.* = .{ .incomplete_chunk_header = std.BoundedArray(u8, 8 - 1).fromSlice(bytes.constSlice()) catch unreachable };
+                if (bytes.len != 0) {
+                    out.* = .{ .incomplete_chunk_header = std.BoundedArray(u8, 8 - 1).fromSlice(bytes.constSlice()) catch unreachable };
+                } else {
+                    out.* = .none;
+                }
                 iter.state = .end;
                 return err;
             };
             if (bytes.len < 8) {
-                out.* = .{ .incomplete_chunk_header = std.BoundedArray(u8, 8 - 1).fromSlice(bytes.constSlice()) catch unreachable };
+                if (bytes.len != 0) {
+                    out.* = .{ .incomplete_chunk_header = std.BoundedArray(u8, 8 - 1).fromSlice(bytes.constSlice()) catch unreachable };
+                } else {
+                    out.* = .none;
+                }
                 iter.state = .end;
                 return;
             }
@@ -263,23 +276,37 @@ pub fn ChunkIterator(
         /// Returning a read error implies the same as returning false.
         /// Also see `getExpectedCrc` and `getActualCrc`.
         pub fn fetchExpectedCrc(iter: *Self) Inner.Error!bool {
-            assert(iter.remaining_bytes == 0); // caller is meant to exhaust the stream returned by `.dataReader()`.
-            assert(iter.expected_crc == null); // shouldn't call twice
+            switch (iter.state) {
+                .start,
+                .end,
+                .expecting_header,
+                => unreachable, //  not valid to call yet
+
+                .got_expected_crc => unreachable, // shouldn't call twice
+                .exhausting_data => {
+                    assert(iter.remaining_bytes == 0); // caller is meant to exhaust the stream returned by `.dataReader()`.
+                    assert(iter.expected_crc == null);
+                },
+            }
 
             var crc_code_bytes: std.BoundedArray(u8, 4) = .{};
             iter.inner.readIntoBoundedBytes(4, &crc_code_bytes) catch |err| {
+                iter.state = .end;
                 return err;
             };
             if (crc_code_bytes.len < 4) {
+                iter.state = .end;
                 return false;
             }
             const crc_code = std.mem.readIntBig(u32, crc_code_bytes.constSlice()[0..4]);
             iter.expected_crc = crc_code;
+            iter.state = .got_expected_crc;
             return true;
         }
 
         /// Get the CRC code found after the chunk data.
         pub inline fn getExpectedCrc(iter: *const Self) u32 {
+            assert(iter.remaining_bytes == 0); //
             // if null, the caller probably forgot to call `fetchExpectedCrc`
             return iter.expected_crc.?;
         }
@@ -288,13 +315,16 @@ pub fn ChunkIterator(
         /// data read from the stream.
         pub inline fn getActualCrc(iter: *const Self) u32 {
             comptime assert(calculate_crc); // must enable CRC calculation in order to use this
+            assert(iter.remaining_bytes == 0); // must exhaust the data reader stream first
             var hasher_copy: std.hash.Crc32 = iter.crc_hasher;
             return hasher_copy.final();
         }
 
         pub const Inner = ReaderType;
         pub const DataReader = std.io.Reader(*Self, Inner.Error, read);
-        /// The caller should read all the bytes from this stream before a subsequent call to `next`.
+        /// The caller should read all the bytes from this
+        /// stream before calling `fetchExpectedCrc`, which
+        /// must be called before a subsequent call to `next*`.
         pub inline fn dataReader(iter: *Self) DataReader {
             return .{ .context = iter };
         }
@@ -312,7 +342,11 @@ pub fn ChunkIterator(
         }
     };
 }
-pub inline fn chunkIterator(reader: anytype, comptime calculate_crc: bool) ChunkIterator(@TypeOf(reader), calculate_crc) {
+pub inline fn chunkIterator(
+    reader: anytype,
+    /// Enables calculating the CRC code.
+    comptime calculate_crc: bool,
+) ChunkIterator(@TypeOf(reader), calculate_crc) {
     return .{ .inner = reader };
 }
 pub const ChunkIteratorSignatureCheck = union(enum) {
