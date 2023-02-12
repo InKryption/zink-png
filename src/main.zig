@@ -762,66 +762,13 @@ test sRGB {
 /// The data at the start of the `iCCP` chunk,
 /// preceding the compressed ICC profile.
 pub const iCCP = struct {
-    pub const profile_name_min_length = 1;
-    pub const profile_name_max_length = 79;
+    pub const profile_name_min_length = ReadNameResult.min_length;
+    pub const profile_name_max_length = ReadNameResult.max_length;
 
-    pub const ReadNameResult = union(enum) {
-        /// the stream returned the whole string, including the null
-        /// byte separator (not included in the attached result).
-        ok: NameBytes,
-        /// the stream returned the maximum number of bytes allowed
-        /// for the profile name, but returned a non-zero byte when
-        /// the null byte separator was expected.
-        bad_sentinel: BadSentinel,
-        /// the stream returned the maximum number of bytes allowed
-        /// for the profile name, but didn't return a null byte (either
-        /// the stream returned an error or it ended).
-        /// Attached is the array of bytes that the stream returned beforehand.
-        no_sentinel: NoSentinel,
-        /// the stream ended or returned an error before returning
-        /// the null byte separator. Attached is a bounded array of
-        /// what the stream returned beforehand.
-        incomplete: Incomplete,
-        /// the stream immedately returned the null byte separator,
-        /// yielding an empty name.
-        empty_string,
-        /// the stream immedately ended.
-        empty_stream,
-        /// the stream immediately returned an error.
-        immediate_error,
-
-        pub const NameBytes = std.BoundedArray(u8, profile_name_max_length);
-        pub const BadSentinel = struct {
-            name: [profile_name_max_length]u8,
-            sentinel: u8,
-        };
-        pub const NoSentinel = [profile_name_max_length]u8;
-        pub const Incomplete = std.BoundedArray(u8, profile_name_max_length - 1);
-
-        // -- convenience --
-
-        pub const UnwrapError = error{
-            BadSentinel,
-            NoSentinel,
-            Incomplete,
-            EmptyString,
-            EmptyStream,
-            ImmediateError,
-        };
-        /// Converts this union to an error union.
-        /// Tags other than `ok` are errors.
-        pub fn unwrap(result: ReadNameResult) UnwrapError!NameBytes {
-            return switch (result) {
-                .ok => |name| name,
-                .bad_sentinel => error.BadSentinel,
-                .no_sentinel => error.NoSentinel,
-                .incomplete => error.Incomplete,
-                .empty_string => error.EmptyString,
-                .empty_stream => error.EmptyStream,
-                .immediate_error => error.ImmediateError,
-            };
-        }
-    };
+    pub const ReadNameResult = shared.ReadBoundedStringResult(.{
+        .min_length = 1,
+        .max_length = 79,
+    });
 
     /// Attempts to read the ICC profile name from the stream.
     ///
@@ -837,60 +784,11 @@ pub const iCCP = struct {
         out: *ReadNameResult,
         reader: anytype,
     ) @TypeOf(reader).Error!void {
-        out.* = undefined;
-        // just to check the result is a valid value
-        // by the end of the function call
-        defer switch (out.*) {
-            else => {},
-        };
-
-        var name: ReadNameResult.NameBytes = .{};
-        if (util.readByteOrNull(reader) catch |err| {
-            out.* = .immediate_error;
-            return err;
-        }) |first_byte| {
-            if (first_byte == 0) {
-                out.* = .empty_string;
-                return;
-            }
-            name.appendAssumeCapacity(first_byte);
-        } else {
-            out.* = .empty_stream;
-            return;
-        }
-
-        while (name.len < profile_name_max_length) {
-            const maybe_byte = util.readByteOrNull(reader) catch |err| {
-                out.* = .{ .incomplete = ReadNameResult.Incomplete.fromSlice(name.constSlice()) catch unreachable };
-                return err;
-            };
-            const byte: u8 = maybe_byte orelse {
-                out.* = .{ .incomplete = ReadNameResult.Incomplete.fromSlice(name.constSlice()) catch unreachable };
-                return;
-            };
-            if (byte == 0) break;
-            name.appendAssumeCapacity(byte);
-        } else {
-            assert(name.len == profile_name_max_length);
-            const maybe_byte = util.readByteOrNull(reader) catch |err| {
-                out.* = .{ .no_sentinel = name };
-                return err;
-            };
-            const sentinel_byte: u8 = maybe_byte orelse {
-                out.* = .{ .no_sentinel = name.constSlice()[0..profile_name_max_length].* };
-                return;
-            };
-            if (sentinel_byte != 0) {
-                out.* = .{ .bad_sentinel = ReadNameResult.BadSentinel{
-                    .name = name.constSlice()[0..profile_name_max_length].*,
-                    .sentinel = sentinel_byte,
-                } };
-                return;
-            }
-        }
-
-        out.* = .{ .ok = name };
-        return;
+        return @call(
+            .always_inline,
+            ReadNameResult.readString,
+            .{ out, reader },
+        );
     }
 
     pub const ValidateNameError = error{
@@ -1034,6 +932,155 @@ test fmtLatin1 {
     try std.testing.expectFmt("abc", "{}", .{fmtLatin1("abc")}); // ascii strings obviously work
     try std.testing.expectFmt("ß Ø £", "{}", .{fmtLatin1(&[_]u8{ 'ß', ' ', 'Ø', ' ', '£' })});
 }
+
+const shared = struct {
+    const ReadBoundedStringResultTag = enum {
+        ok,
+        bad_sentinel,
+        no_sentinel,
+        incomplete,
+        empty_string,
+        empty_stream,
+        immediate_error,
+    };
+    const ReadBoundedStringResultConfig = struct {
+        min_length: comptime_int,
+        max_length: comptime_int,
+    };
+    fn ReadBoundedStringResult(
+        comptime config: ReadBoundedStringResultConfig,
+    ) type {
+        return union(ReadBoundedStringResultTag) {
+            const Result = @This();
+            /// the stream returned the whole string, including the null
+            /// byte separator (not included in the attached result).
+            ok: NameBytes,
+            /// the stream returned the maximum number of bytes allowed
+            /// for the profile name, but returned a non-zero byte when
+            /// the null byte separator was expected.
+            bad_sentinel: BadSentinel,
+            /// the stream returned the maximum number of bytes allowed
+            /// for the profile name, but didn't return a null byte (either
+            /// the stream returned an error or it ended).
+            /// Attached is the array of bytes that the stream returned beforehand.
+            no_sentinel: NoSentinel,
+            /// the stream ended or returned an error before returning
+            /// the null byte separator. Attached is a bounded array of
+            /// what the stream returned beforehand.
+            incomplete: Incomplete,
+            /// the stream immedately returned the null byte separator,
+            /// yielding an empty name.
+            empty_string,
+            /// the stream immedately ended.
+            empty_stream,
+            /// the stream immediately returned an error.
+            immediate_error,
+
+            const min_length = config.min_length;
+            const max_length = config.max_length;
+
+            pub const NameBytes = std.BoundedArray(u8, max_length);
+            pub const BadSentinel = struct {
+                name: [max_length]u8,
+                sentinel: u8,
+            };
+            pub const NoSentinel = [max_length]u8;
+            pub const Incomplete = std.BoundedArray(u8, max_length - 1);
+
+            // -- convenience --
+
+            pub const UnwrapError = error{
+                BadSentinel,
+                NoSentinel,
+                Incomplete,
+                EmptyString,
+                EmptyStream,
+                ImmediateError,
+            };
+            /// Converts this union to an error union.
+            /// Tags other than `ok` are errors.
+            pub fn unwrap(result: Result) UnwrapError!NameBytes {
+                return switch (result) {
+                    .ok => |name| name,
+                    .bad_sentinel => error.BadSentinel,
+                    .no_sentinel => error.NoSentinel,
+                    .incomplete => error.Incomplete,
+                    .empty_string => error.EmptyString,
+                    .empty_stream => error.EmptyStream,
+                    .immediate_error => error.ImmediateError,
+                };
+            }
+
+            /// Attempts to read a bounded string from the stream,
+            /// which is expected to be followed by a null byte.
+            ///
+            /// The result of the function call is written to `out`,
+            /// whether returning normally or with a write error.
+            ///
+            /// If the initialised tag is `ok`, the payload is the ICC profile name.
+            /// Otherwise, the tag and payload describe the failure state.
+            fn readString(
+                out: *Result,
+                reader: anytype,
+            ) @TypeOf(reader).Error!void {
+                out.* = undefined;
+                // just to check the result is a valid value
+                // by the end of the function call
+                defer switch (out.*) {
+                    else => {},
+                };
+
+                var name: Result.NameBytes = .{};
+                if (util.readByteOrNull(reader) catch |err| {
+                    out.* = .immediate_error;
+                    return err;
+                }) |first_byte| {
+                    if (first_byte == 0) {
+                        out.* = .empty_string;
+                        return;
+                    }
+                    name.appendAssumeCapacity(first_byte);
+                } else {
+                    out.* = .empty_stream;
+                    return;
+                }
+
+                while (name.len < max_length) {
+                    const maybe_byte = util.readByteOrNull(reader) catch |err| {
+                        out.* = .{ .incomplete = Result.Incomplete.fromSlice(name.constSlice()) catch unreachable };
+                        return err;
+                    };
+                    const byte: u8 = maybe_byte orelse {
+                        out.* = .{ .incomplete = Result.Incomplete.fromSlice(name.constSlice()) catch unreachable };
+                        return;
+                    };
+                    if (byte == 0) break;
+                    name.appendAssumeCapacity(byte);
+                } else {
+                    assert(name.len == max_length);
+                    const maybe_byte = util.readByteOrNull(reader) catch |err| {
+                        out.* = .{ .no_sentinel = name };
+                        return err;
+                    };
+                    const sentinel_byte: u8 = maybe_byte orelse {
+                        out.* = .{ .no_sentinel = name.constSlice()[0..max_length].* };
+                        return;
+                    };
+                    if (sentinel_byte != 0) {
+                        out.* = .{ .bad_sentinel = Result.BadSentinel{
+                            .name = name.constSlice()[0..max_length].*,
+                            .sentinel = sentinel_byte,
+                        } };
+                        return;
+                    }
+                }
+
+                out.* = .{ .ok = name };
+                return;
+            }
+        };
+    }
+};
 
 const util = struct {
     /// Read a byte from the stream, or return null if the stream is empty.
