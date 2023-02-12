@@ -8,25 +8,40 @@ pub const ChunkHeader = struct {
     length: u31,
     type: ChunkType,
 
-    pub const FromBytesError = error{
+    pub const ValidateError = error{
         InvalidLength,
-        InvalidChunkType,
+        InvalidType,
     };
-    pub fn fromBytes(bytes: *const [8]u8) FromBytesError!ChunkHeader {
-        const length: u31 = try (std.math.cast(u31, std.mem.readIntBig(u32, bytes[0..4])) orelse error.InvalidLength);
-        const chunk_type = try (ChunkType.from(bytes[4..8].*) orelse error.InvalidChunkType);
-        return ChunkHeader{
-            .length = length,
-            .type = chunk_type,
+    pub fn fromBytes(bytes: *const [8]u8) Raw {
+        var result: Raw = @bitCast(Raw, bytes.*);
+        result.length = std.mem.bigToNative(u32, result.length);
+        return result;
+    }
+
+    pub fn toRaw(chunk_header: ChunkHeader) Raw {
+        return Raw{
+            .length = chunk_header.length,
+            .type = chunk_header.type.string(),
         };
     }
 
-    pub fn toBytes(chunk_header: ChunkHeader) [8]u8 {
-        var bytes: [8]u8 align(@alignOf(u32)) = undefined;
-        @ptrCast(*u32, bytes[0..4]).* = std.mem.nativeToBig(u32, chunk_header.length);
-        bytes[4..8].* = chunk_header.type.string();
-        return bytes;
-    }
+    pub const Raw = extern struct {
+        length: u32,
+        type: [4]u8,
+
+        pub fn validate(raw: Raw) ValidateError!ChunkHeader {
+            return ChunkHeader{
+                .length = try (std.math.cast(u31, raw.length) orelse error.InvalidLength),
+                .type = try (ChunkType.from(raw.type) orelse error.InvalidType),
+            };
+        }
+
+        pub fn toBytes(raw: Raw) [8]u8 {
+            var copy = raw;
+            copy.length = std.mem.nativeToBig(u32, copy.length);
+            return @bitCast([8]u8, copy);
+        }
+    };
 };
 
 test ChunkHeader {
@@ -34,7 +49,7 @@ test ChunkHeader {
         .length = 13,
         .type = .IHDR,
     };
-    try std.testing.expectEqual(@as(ChunkHeader.FromBytesError!ChunkHeader, header), ChunkHeader.fromBytes(&header.toBytes()));
+    try std.testing.expectEqual(@as(ChunkHeader.ValidateError!ChunkHeader, header), ChunkHeader.fromBytes(&header.toRaw().toBytes()).validate());
 }
 
 pub const ChunkType = enum(u32) {
@@ -116,12 +131,16 @@ test ChunkType {
     }
 }
 
-pub fn ChunkIterator(comptime ReaderType: type) type {
+pub fn ChunkIterator(
+    comptime ReaderType: type,
+    /// Enables hashing the CRC code.
+    comptime calculate_crc: bool,
+) type {
     return struct {
         const Self = @This();
         inner: Inner,
         remaining_bytes: u31 = undefined,
-        crc_hasher: std.hash.Crc32 = std.hash.Crc32.init(),
+        crc_hasher: if (calculate_crc) std.hash.Crc32 else void = if (calculate_crc) std.hash.Crc32.init() else {},
         expected_crc: ?u32 = null,
         state: State = .start,
 
@@ -194,6 +213,7 @@ pub fn ChunkIterator(comptime ReaderType: type) type {
         /// attained from the stream and decoded correctly.
         pub fn nextAdvanced(iter: *Self, out: *NextResult) Inner.Error!void {
             switch (iter.state) {
+                .start => unreachable, // meant to call `checkSignature*` first.s
                 .end => {
                     out.* = .none;
                     return;
@@ -202,33 +222,31 @@ pub fn ChunkIterator(comptime ReaderType: type) type {
                     assert(iter.expected_crc == null);
                 },
                 .exhausting_data => {
-                    assert(iter.remaining_bytes == 0); // caller is meant to exhaust the stream returned by `.reader()`
+                    assert(iter.remaining_bytes == 0); // caller is meant to exhaust the stream returned by `.dataReader()`
                     assert(iter.expected_crc != null); // caller is meant to first call `.fetchExpectedCrc()`
                     iter.remaining_bytes = undefined;
                     iter.expected_crc = null;
                     iter.state = .expecting_header;
                 },
-                else => unreachable,
             }
 
             var bytes: std.BoundedArray(u8, 8) = .{};
             iter.inner.readIntoBoundedBytes(8, &bytes) catch |err| {
-                out.* = .{ .incomplete_bytes = std.BoundedArray(u8, 8 - 1).fromSlice(bytes.constSlice()) catch unreachable };
+                out.* = .{ .incomplete_chunk_header = std.BoundedArray(u8, 8 - 1).fromSlice(bytes.constSlice()) catch unreachable };
                 iter.state = .end;
                 return err;
             };
             if (bytes.len < 8) {
-                out.* = .{ .incomplete_bytes = std.BoundedArray(u8, 8 - 1).fromSlice(bytes.constSlice()) catch unreachable };
+                out.* = .{ .incomplete_chunk_header = std.BoundedArray(u8, 8 - 1).fromSlice(bytes.constSlice()) catch unreachable };
                 iter.state = .end;
                 return;
             }
-            const header = ChunkHeader.fromBytes(bytes.constSlice()[0..8]) catch |err| {
+            const raw_reader = ChunkHeader.fromBytes(bytes.constSlice()[0..8]);
+            const header = raw_reader.validate() catch |err| {
                 out.* = switch (err) {
-                    error.InvalidLength => .{ .invalid_length = std.mem.readIntBig(u32, bytes.constSlice()[0..4]) },
-                    error.InvalidChunkType => .{ .invalid_chunk_type = NextResult.InvalidChunkType{
-                        .length = @intCast(u31, std.mem.readIntBig(u32, bytes.constSlice()[0..4])),
-                        .type = std.mem.readIntBig(u32, bytes.constSlice()[4..8]),
-                    } },
+                    error.InvalidLength,
+                    error.InvalidType,
+                    => .{ .invalid_chunk_header = raw_reader },
                 };
                 iter.state = .end;
                 return;
@@ -242,9 +260,11 @@ pub fn ChunkIterator(comptime ReaderType: type) type {
 
         /// Returns true on successfully reading the CRC code,
         /// false if the stream ended before returning it fully.
+        /// Returning a read error implies the same as returning false.
+        /// Also see `getExpectedCrc` and `getActualCrc`.
         pub fn fetchExpectedCrc(iter: *Self) Inner.Error!bool {
-            assert(iter.remaining_bytes == 0); // caller is meant to exhaust the stream returned by `.reader()`.
-            assert(iter.expected_crc == null);
+            assert(iter.remaining_bytes == 0); // caller is meant to exhaust the stream returned by `.dataReader()`.
+            assert(iter.expected_crc == null); // shouldn't call twice
 
             var crc_code_bytes: std.BoundedArray(u8, 4) = .{};
             iter.inner.readIntoBoundedBytes(4, &crc_code_bytes) catch |err| {
@@ -258,22 +278,24 @@ pub fn ChunkIterator(comptime ReaderType: type) type {
             return true;
         }
 
-        pub const CrcCodes = struct { expected: u32, actual: u32 };
-        pub fn getCrc(iter: *Self) CrcCodes {
-            assert(iter.remaining_bytes == 0);
-            var crc_hasher_copy = iter.crc_hasher;
-            return .{
-                .expected = iter.expected_crc.?,
-                .actual = crc_hasher_copy.final(),
-            };
+        /// Get the CRC code found after the chunk data.
+        pub inline fn getExpectedCrc(iter: *const Self) u32 {
+            // if null, the caller probably forgot to call `fetchExpectedCrc`
+            return iter.expected_crc.?;
+        }
+
+        /// Get the CRC code calculated based off of the
+        /// data read from the stream.
+        pub inline fn getActualCrc(iter: *const Self) u32 {
+            comptime assert(calculate_crc); // must enable CRC calculation in order to use this
+            var hasher_copy: std.hash.Crc32 = iter.crc_hasher;
+            return hasher_copy.final();
         }
 
         pub const Inner = ReaderType;
-        pub const Reader = std.io.Reader(*Self, Inner.Error, read);
+        pub const DataReader = std.io.Reader(*Self, Inner.Error, read);
         /// The caller should read all the bytes from this stream before a subsequent call to `next`.
-        pub inline fn reader(iter: *Self) Reader {
-            assert(iter.remaining_bytes != 0);
-            assert(iter.expected_crc == null);
+        pub inline fn dataReader(iter: *Self) DataReader {
             return .{ .context = iter };
         }
 
@@ -282,13 +304,15 @@ pub fn ChunkIterator(comptime ReaderType: type) type {
             if (iter.remaining_bytes == 0) return 0;
             const amt = @intCast(u31, @min(buffer.len, iter.remaining_bytes));
             const bytes_read = @intCast(u31, try iter.inner.read(buffer[0..amt]));
-            iter.crc_hasher.update(buffer[0..bytes_read]);
+            if (calculate_crc) {
+                iter.crc_hasher.update(buffer[0..bytes_read]);
+            }
             iter.remaining_bytes -= bytes_read;
             return bytes_read;
         }
     };
 }
-pub inline fn chunkIterator(reader: anytype) ChunkIterator(@TypeOf(reader)) {
+pub inline fn chunkIterator(reader: anytype, comptime calculate_crc: bool) ChunkIterator(@TypeOf(reader), calculate_crc) {
     return .{ .inner = reader };
 }
 pub const ChunkIteratorSignatureCheck = union(enum) {
@@ -307,22 +331,15 @@ pub const ChunkIteratorSignatureCheck = union(enum) {
 pub const ChunkIteratorNextResult = union(enum) {
     none,
     ok: ChunkHeader,
-    incomplete_bytes: std.BoundedArray(u8, 8 - 1),
-    invalid_length: u32,
-    invalid_chunk_type: InvalidChunkType,
+    incomplete_chunk_header: std.BoundedArray(u8, 8 - 1),
+    invalid_chunk_header: ChunkHeader.Raw,
 
-    pub const InvalidChunkType = struct {
-        length: u31,
-        type: u32,
-    };
-
-    pub inline fn unwrap(result: ChunkIteratorNextResult) error{ IncompleteBytes, InvalidLength, InvalidChunkType }!?ChunkHeader {
+    pub inline fn unwrap(result: ChunkIteratorNextResult) error{ IncompleteBytes, InvalidChunkHeader }!?ChunkHeader {
         return switch (result) {
             .none => null,
             .ok => |header| header,
-            .incomplete_bytes => error.IncompleteBytes,
-            .invalid_length => error.InvalidLength,
-            .invalid_chunk_type => error.InvalidChunkType,
+            .incomplete_chunk_header => error.IncompleteBytes,
+            .invalid_chunk_header => error.InvalidChunkHeader,
         };
     }
 };
