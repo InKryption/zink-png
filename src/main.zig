@@ -117,13 +117,27 @@ test ChunkType {
 }
 
 pub const IHDR = struct {
-    width: u31,
-    height: u31,
-    bit_depth: BitDepth,
-    color_type: ColorType,
-    compression_method: CompressionMethod,
-    filter_method: FilterMethod,
-    interlace_method: InterlaceMethod,
+    pub const Data = struct {
+        width: u31,
+        height: u31,
+        bit_depth: BitDepth,
+        color_type: ColorType,
+        compression_method: CompressionMethod,
+        filter_method: FilterMethod,
+        interlace_method: InterlaceMethod,
+
+        pub fn toBytes(data: IHDR.Data) [13]u8 {
+            var result: [13]u8 = undefined;
+            result[0..][0..4].* = @bitCast([4]u8, std.mem.nativeToBig(u32, data.width));
+            result[4..][0..4].* = @bitCast([4]u8, std.mem.nativeToBig(u32, data.height));
+            result[8] = @enumToInt(data.bit_depth);
+            result[9] = @enumToInt(data.color_type);
+            result[10] = @enumToInt(data.compression_method);
+            result[11] = @enumToInt(data.filter_method);
+            result[12] = @enumToInt(data.interlace_method);
+            return result;
+        }
+    };
 
     pub const FromBytesError = error{
         InvalidWidth,
@@ -135,7 +149,7 @@ pub const IHDR = struct {
         InvalidFilterMethod,
     };
 
-    pub fn fromBytes(bytes: *const [13]u8) FromBytesError!IHDR {
+    pub fn fromBytes(bytes: *const [13]u8) FromBytesError!IHDR.Data {
         comptime var start = 0;
         defer assert(start == bytes.len);
 
@@ -172,7 +186,7 @@ pub const IHDR = struct {
         const interlace_method = try (util.intToEnum(InterlaceMethod, bytes[start]) orelse error.InvalidFilterMethod);
         start += 1;
 
-        return IHDR{
+        return IHDR.Data{
             .width = width,
             .height = height,
             .bit_depth = bit_depth,
@@ -181,18 +195,6 @@ pub const IHDR = struct {
             .filter_method = filter_method,
             .interlace_method = interlace_method,
         };
-    }
-
-    pub fn toBytes(data: IHDR) [13]u8 {
-        var result: [13]u8 = undefined;
-        result[0..][0..4].* = @bitCast([4]u8, std.mem.nativeToBig(u32, data.width));
-        result[4..][0..4].* = @bitCast([4]u8, std.mem.nativeToBig(u32, data.height));
-        result[8] = @enumToInt(data.bit_depth);
-        result[9] = @enumToInt(data.color_type);
-        result[10] = @enumToInt(data.compression_method);
-        result[11] = @enumToInt(data.filter_method);
-        result[12] = @enumToInt(data.interlace_method);
-        return result;
     }
 
     pub const BitDepth = enum(u8) {
@@ -247,7 +249,7 @@ pub const IHDR = struct {
     };
 };
 test IHDR {
-    const data = IHDR{
+    const data = IHDR.Data{
         .width = 1,
         .height = 1,
         .bit_depth = .@"1",
@@ -256,13 +258,52 @@ test IHDR {
         .filter_method = .method_0,
         .interlace_method = .none,
     };
-    try std.testing.expectEqual(@as(IHDR.FromBytesError!IHDR, data), IHDR.fromBytes(&data.toBytes()));
+    try std.testing.expectEqual(@as(IHDR.FromBytesError!IHDR.Data, data), IHDR.fromBytes(&data.toBytes()));
 }
 
 pub const PLTE = struct {
-    entries_buf: [256]Entry,
-    len_minus_one: LenMinusOne,
+    pub const Palette = struct {
+        entries_buf: [PLTE.max_entries]Entry,
+        len_minus_one: LenMinusOne,
 
+        pub fn AsBytes(comptime PalettePtr: type) type {
+            var pointer_info = @typeInfo(PalettePtr).Pointer;
+            assert(pointer_info.child == PLTE.Palette);
+            assert(pointer_info.size == .One);
+
+            pointer_info.child = u8;
+            pointer_info.size = .Slice;
+            return @Type(.{ .Pointer = pointer_info });
+        }
+        /// Returns a slice of bytes, backed by the palette entries.
+        pub fn asBytes(palette: anytype) AsBytes(@TypeOf(palette)) {
+            return std.mem.sliceAsBytes(entries(palette));
+        }
+
+        pub inline fn get(palette: *const PLTE.Palette, index: LenMinusOne) Entry {
+            return palette.entries()[index];
+        }
+
+        pub fn Entries(comptime PalettePtr: type) type {
+            var pointer_info = @typeInfo(PalettePtr).Pointer;
+            assert(pointer_info.child == PLTE.Palette);
+            assert(pointer_info.size == .One);
+
+            pointer_info.child = Entry;
+            pointer_info.size = .Slice;
+            return @Type(.{ .Pointer = pointer_info });
+        }
+        pub inline fn entries(palette: anytype) Entries(@TypeOf(palette)) {
+            return palette.entries_buf[0..len(palette.*)];
+        }
+
+        pub const Len = std.math.IntFittingRange(1, 256);
+        pub inline fn len(data: PLTE.Palette) Len {
+            return @as(Len, data.len_minus_one) + 1;
+        }
+    };
+
+    pub const max_entries = 256;
     pub const Entry = extern struct { r: u8, g: u8, b: u8 };
     pub const LenMinusOne = std.math.IntFittingRange(1 - 1, 256 - 1);
 
@@ -272,7 +313,7 @@ pub const PLTE = struct {
         MissingOneByte,
         MissingTwoBytes,
     };
-    pub fn fromBytes(bytes: []const u8) FromBytesError!PLTE {
+    pub fn fromBytes(bytes: []const u8) FromBytesError!PLTE.Palette {
         if (bytes.len == 0) return error.NoEntries;
         if (bytes.len > 256 * 3) return error.TooManyBytes;
         try switch (bytes.len % 3) {
@@ -283,201 +324,220 @@ pub const PLTE = struct {
         };
         const entries_slice = std.mem.bytesAsSlice(Entry, bytes);
         assert(entries_slice.len <= 256);
-        var result = PLTE{
+        var result = PLTE.Palette{
             .entries_buf = undefined,
             .len_minus_one = @intCast(LenMinusOne, entries_slice.len - 1),
         };
         std.mem.copy(Entry, result.entries(), entries_slice);
         return result;
     }
-
-    pub fn AsBytes(comptime PointerToPLTE: type) type {
-        var pointer_info = @typeInfo(PointerToPLTE).Pointer;
-        assert(pointer_info.child == PLTE);
-        assert(pointer_info.size == .One);
-
-        pointer_info.child = u8;
-        pointer_info.size = .Slice;
-        return @Type(.{ .Pointer = pointer_info });
-    }
-    /// Returns a slice of bytes, backed by the palette entries.
-    pub fn asBytes(palette: anytype) AsBytes(@TypeOf(palette)) {
-        return std.mem.sliceAsBytes(entries(palette));
-    }
-
-    pub inline fn get(palette: *const PLTE, index: LenMinusOne) Entry {
-        return palette.entries()[index];
-    }
-
-    pub fn Entries(comptime PointerToPLTE: type) type {
-        var pointer_info = @typeInfo(PointerToPLTE).Pointer;
-        assert(pointer_info.child == PLTE);
-        assert(pointer_info.size == .One);
-
-        pointer_info.child = Entry;
-        pointer_info.size = .Slice;
-        return @Type(.{ .Pointer = pointer_info });
-    }
-    pub inline fn entries(palette: anytype) Entries(@TypeOf(palette)) {
-        return palette.entries_buf[0..len(palette.*)];
-    }
-
-    pub const Len = std.math.IntFittingRange(1, 256);
-    pub inline fn len(data: PLTE) Len {
-        return @as(Len, data.len_minus_one) + 1;
-    }
 };
 test PLTE {
-    const data = PLTE{
+    // zig fmt: off
+    try std.testing.expectError(error.NoEntries,       PLTE.fromBytes(&[_]u8{} ** 0));
+    try std.testing.expectError(error.MissingTwoBytes, PLTE.fromBytes(&[_]u8{0} ** (256 * 3 - 2)));
+    try std.testing.expectError(error.MissingOneByte,  PLTE.fromBytes(&[_]u8{0} ** (256 * 3 - 1)));
+    try std.testing.expectError(error.TooManyBytes,    PLTE.fromBytes(&[_]u8{0} ** (256 * 3 + 1)));
+    // zig fmt: on
+
+    const data = PLTE.Palette{
         .entries_buf = [_]PLTE.Entry{.{ .r = 0, .g = 0, .b = 0 }} ** 256,
         .len_minus_one = 256 - 1,
     };
-    try std.testing.expectEqual(@as(PLTE.FromBytesError!PLTE, data), PLTE.fromBytes(data.asBytes()));
+    try std.testing.expectEqual(@as(PLTE.FromBytesError!PLTE.Palette, data), PLTE.fromBytes(data.asBytes()));
 }
 
-/// Data for `tRNS` when image is using color type 0
-pub const tRNS_0 = enum(u16) {
-    _,
+pub const tRNS = struct {
+    /// Data for `tRNS` when image is using color type 0
+    pub const Grayscale = enum(u16) {
+        _,
 
-    pub inline fn fromBytes(bytes: [2]u8) tRNS_0 {
-        const int = std.mem.readIntBig(u16, &bytes);
-        return @intToEnum(tRNS_0, int);
-    }
+        pub const color_type = IHDR.ColorType.grayscale;
 
-    pub inline fn toBytes(gray_level: tRNS_0) [2]u8 {
-        var bytes: [2]u8 = undefined;
-        std.mem.writeIntBig(u16, &bytes, @enumToInt(gray_level));
-        return bytes;
-    }
+        pub inline fn fromBytes(bytes: [2]u8) Grayscale {
+            const int = std.mem.readIntBig(WithBitDepth(.@"16"), &bytes);
+            return fromInt(.@"16", int);
+        }
 
-    pub fn WithBitDepth(comptime bit_depth: IHDR.BitDepth) type {
-        return switch (bit_depth) {
-            .@"1" => u1,
-            .@"2" => u2,
-            .@"4" => u4,
-            .@"8" => u8,
-            .@"16" => u16,
-        };
-    }
-    pub inline fn withBitDepth(transparency: tRNS_0, comptime bit_depth: IHDR.BitDepth) WithBitDepth(bit_depth) {
-        const int = @enumToInt(transparency);
-        const result = @truncate(WithBitDepth(bit_depth), int);
-        assert(int == result); // the discarded most significant bits should be 0
-        return result;
-    }
-};
+        pub inline fn toBytes(gray_level: Grayscale) [2]u8 {
+            var bytes: [2]u8 = undefined;
+            std.mem.writeIntBig(u16, &bytes, @enumToInt(gray_level));
+            return bytes;
+        }
 
-/// Data for `tRNS` when image is using color type 2
-pub const tRNS_2 = struct {
-    r_level: u16,
-    g_level: u16,
-    b_level: u16,
+        pub inline fn fromInt(
+            comptime bit_depth: IHDR.BitDepth,
+            int: WithBitDepth(bit_depth),
+        ) Grayscale {
+            return @intToEnum(Grayscale, int);
+        }
 
-    pub inline fn fromBytes(bytes: [6]u8) tRNS_2 {
-        return tRNS_2{
-            .r_level = std.mem.readIntBig(u16, bytes[0..2]),
-            .g_level = std.mem.readIntBig(u16, bytes[2..4]),
-            .b_level = std.mem.readIntBig(u16, bytes[4..6]),
-        };
-    }
-
-    pub inline fn toBytes(transparency: tRNS_2) [6]u8 {
-        var bytes: [6]u8 = undefined;
-        std.mem.writeIntBig(u16, bytes[0..2], transparency.r_level);
-        std.mem.writeIntBig(u16, bytes[2..4], transparency.g_level);
-        std.mem.writeIntBig(u16, bytes[4..6], transparency.b_level);
-        return bytes;
-    }
-
-    pub fn WithBitDepth(comptime bit_depth: IHDR.BitDepth) type {
-        const Int = switch (bit_depth) {
-            .@"1" => u1,
-            .@"2" => u2,
-            .@"4" => u4,
-            .@"8" => u8,
-            .@"16" => u16,
-        };
-        return struct { r: Int, g: Int, b: Int };
-    }
-    pub inline fn withBitDepth(transparency: tRNS_2, comptime bit_depth: IHDR.BitDepth) WithBitDepth(bit_depth) {
-        const FieldType = std.meta.FieldType;
-        const Color = WithBitDepth(bit_depth);
-        const result = Color{
-            .r = @truncate(FieldType(Color, .r), transparency.r_level),
-            .g = @truncate(FieldType(Color, .g), transparency.g_level),
-            .b = @truncate(FieldType(Color, .b), transparency.b_level),
-        };
-        assert(result.r == transparency.r_level); // the discarded most significant bits should be 0
-        assert(result.g == transparency.g_level); // the discarded most significant bits should be 0
-        assert(result.b == transparency.b_level); // the discarded most significant bits should be 0
-        return result;
-    }
-};
-
-/// Data for `tRNS` when image is using color type 3
-pub const tRNS_3 = struct {
-    entries_buf: [256]Entry,
-    len_minus_one: LenMinusOne,
-
-    pub const Entry = u8;
-    pub const LenMinusOne = std.math.IntFittingRange(1 - 1, 256 - 1);
-
-    pub const FromBytesError = error{
-        NoEntries,
-        TooManyBytes,
+        pub fn WithBitDepth(comptime bit_depth: IHDR.BitDepth) type {
+            return switch (bit_depth) {
+                .@"1" => u1,
+                .@"2" => u2,
+                .@"4" => u4,
+                .@"8" => u8,
+                .@"16" => u16,
+            };
+        }
+        pub inline fn withBitDepth(
+            transparency: Grayscale,
+            comptime bit_depth: IHDR.BitDepth,
+        ) ?WithBitDepth(bit_depth) {
+            const int = @enumToInt(transparency);
+            const result = std.math.cast(WithBitDepth(bit_depth), int) orelse return null;
+            assert(int == result); // the discarded most significant bits should be 0
+            return result;
+        }
     };
-    pub fn fromBytes(bytes: []const u8) FromBytesError!tRNS_3 {
-        if (bytes.len == 0) return error.NoEntries;
-        if (bytes.len > 256) return error.TooManyBytes;
-        var result = tRNS_3{
-            .entries_buf = undefined,
-            .len_minus_one = @intCast(LenMinusOne, bytes.len - 1),
+    test Grayscale {
+        const gray_level = tRNS.Grayscale.fromInt(.@"8", 255);
+        try std.testing.expectEqual(gray_level, tRNS.Grayscale.fromBytes(gray_level.toBytes()));
+
+        try std.testing.expectEqual(@as(?tRNS.Grayscale.WithBitDepth(.@"4"), null), gray_level.withBitDepth(.@"4"));
+        // NOTE: Doesn't track the bit depth, so upcasting works incidentally.
+        try std.testing.expectEqual(@as(?tRNS.Grayscale.WithBitDepth(.@"16"), 255), gray_level.withBitDepth(.@"16"));
+    }
+
+    /// Data for `tRNS` when image is using color type 2
+    pub const Rgb = struct {
+        r_level: u16,
+        g_level: u16,
+        b_level: u16,
+
+        pub const color_type = IHDR.ColorType.rgb;
+
+        pub inline fn fromBytes(bytes: [6]u8) Rgb {
+            return Rgb{
+                .r_level = std.mem.readIntBig(u16, bytes[0..2]),
+                .g_level = std.mem.readIntBig(u16, bytes[2..4]),
+                .b_level = std.mem.readIntBig(u16, bytes[4..6]),
+            };
+        }
+
+        pub inline fn toBytes(transparency: Rgb) [6]u8 {
+            var bytes: [6]u8 = undefined;
+            std.mem.writeIntBig(u16, bytes[0..2], transparency.r_level);
+            std.mem.writeIntBig(u16, bytes[2..4], transparency.g_level);
+            std.mem.writeIntBig(u16, bytes[4..6], transparency.b_level);
+            return bytes;
+        }
+
+        pub fn WithBitDepth(comptime bit_depth: IHDR.BitDepth) type {
+            const Int = switch (bit_depth) {
+                .@"1" => u1,
+                .@"2" => u2,
+                .@"4" => u4,
+                .@"8" => u8,
+                .@"16" => u16,
+            };
+            return struct { r: Int, g: Int, b: Int };
+        }
+        pub inline fn withBitDepth(transparency: Rgb, comptime bit_depth: IHDR.BitDepth) ?WithBitDepth(bit_depth) {
+            const FieldType = std.meta.FieldType;
+            const Color = WithBitDepth(bit_depth);
+            const result = Color{
+                .r = std.math.cast(FieldType(Color, .r), transparency.r_level) orelse return null,
+                .g = std.math.cast(FieldType(Color, .g), transparency.g_level) orelse return null,
+                .b = std.math.cast(FieldType(Color, .b), transparency.b_level) orelse return null,
+            };
+            assert(result.r == transparency.r_level); // the discarded most significant bits should be 0
+            assert(result.g == transparency.g_level); // the discarded most significant bits should be 0
+            assert(result.b == transparency.b_level); // the discarded most significant bits should be 0
+            return result;
+        }
+    };
+    test Rgb {
+        const rgb_level = tRNS.Rgb.fromBytes(std.mem.toBytes([3]u16{
+            std.mem.nativeToBig(u16, 32),
+            std.mem.nativeToBig(u16, 64),
+            std.mem.nativeToBig(u16, 128),
+        }));
+        try std.testing.expectEqual(rgb_level, tRNS.Rgb.fromBytes(rgb_level.toBytes()));
+
+        try std.testing.expectEqual(@as(?tRNS.Rgb.WithBitDepth(.@"16"), .{ .r = 32, .g = 64, .b = 128 }), rgb_level.withBitDepth(.@"16"));
+        try std.testing.expectEqual(@as(?tRNS.Rgb.WithBitDepth(.@"2"), null), rgb_level.withBitDepth(.@"2"));
+    }
+
+    /// Data for `tRNS` when image is using color type 3
+    pub const Palette = struct {
+        entries_buf: [256]Entry,
+        len_minus_one: LenMinusOne,
+
+        pub const color_type = IHDR.ColorType.palette;
+
+        pub const Entry = u8;
+        pub const LenMinusOne = std.math.IntFittingRange(1 - 1, 256 - 1);
+
+        pub const FromBytesError = error{
+            NoEntries,
+            TooManyBytes,
         };
-        std.mem.copy(Entry, result.entries(), bytes);
-        return result;
-    }
+        pub fn fromBytes(bytes: []const u8) FromBytesError!Palette {
+            if (bytes.len == 0) return error.NoEntries;
+            if (bytes.len > 256) return error.TooManyBytes;
+            var result = Palette{
+                .entries_buf = undefined,
+                .len_minus_one = @intCast(LenMinusOne, bytes.len - 1),
+            };
+            std.mem.copy(Entry, result.entries(), bytes);
+            return result;
+        }
 
-    pub fn AsBytes(comptime PointerToPLTE: type) type {
-        var pointer_info = @typeInfo(PointerToPLTE).Pointer;
-        assert(pointer_info.child == tRNS_3);
-        assert(pointer_info.size == .One);
+        pub fn AsBytes(comptime PalettePtr: type) type {
+            var pointer_info = @typeInfo(PalettePtr).Pointer;
+            assert(pointer_info.child == Palette);
+            assert(pointer_info.size == .One);
 
-        pointer_info.alignment = 1;
-        pointer_info.child = u8;
-        pointer_info.size = .Slice;
-        return @Type(.{ .Pointer = pointer_info });
-    }
-    /// Returns a slice of bytes, backed by the transparency entries.
-    pub fn asBytes(transparency: anytype) AsBytes(@TypeOf(transparency)) {
-        return std.mem.sliceAsBytes(entries(transparency));
-    }
+            pointer_info.alignment = 1;
+            pointer_info.child = u8;
+            pointer_info.size = .Slice;
+            return @Type(.{ .Pointer = pointer_info });
+        }
+        /// Returns a slice of bytes, backed by the transparency entries.
+        pub fn asBytes(transparency: anytype) AsBytes(@TypeOf(transparency)) {
+            return std.mem.sliceAsBytes(entries(transparency));
+        }
 
-    pub inline fn get(transparency: *const tRNS_3, index: LenMinusOne) Entry {
-        return transparency.entries()[index];
-    }
+        pub inline fn get(transparency: *const Palette, index: LenMinusOne) Entry {
+            return transparency.entries()[index];
+        }
 
-    pub fn Entries(comptime PointerToPLTE: type) type {
-        var pointer_info = @typeInfo(PointerToPLTE).Pointer;
-        assert(pointer_info.child == tRNS_3);
-        assert(pointer_info.size == .One);
+        pub fn Entries(comptime PalettePtr: type) type {
+            var pointer_info = @typeInfo(PalettePtr).Pointer;
+            assert(pointer_info.child == Palette);
+            assert(pointer_info.size == .One);
 
-        pointer_info.child = Entry;
-        pointer_info.size = .Slice;
-        return @Type(.{ .Pointer = pointer_info });
-    }
-    pub inline fn entries(transparency: anytype) Entries(@TypeOf(transparency)) {
-        return transparency.entries_buf[0..len(transparency.*)];
-    }
+            pointer_info.child = Entry;
+            pointer_info.size = .Slice;
+            return @Type(.{ .Pointer = pointer_info });
+        }
+        pub inline fn entries(transparency: anytype) Entries(@TypeOf(transparency)) {
+            return transparency.entries_buf[0..len(transparency.*)];
+        }
 
-    pub const Len = std.math.IntFittingRange(1, 256);
-    pub inline fn len(data: tRNS_3) Len {
-        return @as(Len, data.len_minus_one) + 1;
+        pub const Len = std.math.IntFittingRange(1, 256);
+        pub inline fn len(data: Palette) Len {
+            return @as(Len, data.len_minus_one) + 1;
+        }
+    };
+    test Palette {
+        try std.testing.expectError(error.NoEntries, tRNS.Palette.fromBytes(&[_]u8{}));
+        try std.testing.expectError(error.TooManyBytes, tRNS.Palette.fromBytes(&[_]u8{0} ** 257));
+        const palette = tRNS.Palette.fromBytes(&[_]u8{ 0, 1, 2, 3, 4, 5 }) catch undefined;
+        _ = palette;
     }
 };
+comptime {
+    if (builtin.is_test) {
+        _ = tRNS;
+    }
+}
 
 pub const TransparentPaletteIterator = struct {
-    palette: *const PLTE,
-    transparency: *const tRNS_3,
+    palette: *const PLTE.Palette,
+    transparency: *const tRNS.Palette,
     index: PLTE.LenMinusOne = 0,
 
     pub const Entry = struct {
@@ -504,8 +564,8 @@ pub const TransparentPaletteIterator = struct {
     }
 };
 pub fn transparentPaletteIterator(
-    palette: *const PLTE,
-    transparency: *const tRNS_3,
+    palette: *const PLTE.Palette,
+    transparency: *const tRNS.Palette,
 ) error{TooManyTransparencyEntries}!TransparentPaletteIterator {
     if (palette.len() < transparency.len())
         return error.TooManyTransparencyEntries;
@@ -514,7 +574,6 @@ pub fn transparentPaletteIterator(
         .transparency = transparency,
     };
 }
-
 test transparentPaletteIterator {
     const palette = try PLTE.fromBytes(&[_]u8{
         0x00, 0x00, 0xff,
@@ -522,7 +581,7 @@ test transparentPaletteIterator {
         0x32, 0x32, 0x32,
         0xff, 0x00, 0x0,
     });
-    const transparency = try tRNS_3.fromBytes(&[_]u8{
+    const transparency = try tRNS.Palette.fromBytes(&[_]u8{
         0xef,
         0xab,
         0xfa,
@@ -566,7 +625,6 @@ pub const gAMA = enum(u32) {
         return @intToFloat(T, gamma.times_100_000()) / 100_000.0;
     }
 };
-
 test gAMA {
     const gamma: gAMA = sRGB.compat_gAMA();
     try std.testing.expectEqual(@as(f128, 0.45_455), gamma.as(f128));
@@ -630,7 +688,6 @@ pub const cHRM = struct {
         }
     };
 };
-
 test cHRM {
     const chroma: cHRM = sRGB.compat_cHRM();
     try std.testing.expectEqual(chroma, cHRM.fromBytes(&chroma.toBytes()));
@@ -697,7 +754,6 @@ pub const sRGB = enum(u8) {
         };
     }
 };
-
 test sRGB {
     const color_space: sRGB = .absolute_colorimetric;
     try std.testing.expectEqual(@as(sRGB.FromBytesError!sRGB, color_space), sRGB.fromBytes(color_space.toBytes()));
@@ -705,170 +761,296 @@ test sRGB {
 
 /// The data at the start of the `iCCP` chunk,
 /// preceding the compressed ICC profile.
-pub const iCCP_Start = struct {
-    name: ProfileName,
-    compression_method: CompressionMethod,
+pub const iCCP = struct {
+    pub const profile_name_min_length = 1;
+    pub const profile_name_max_length = 79;
 
-    pub const FromBytesError = error{
-        /// The stream returned no profile name bytes.
-        NoProfileName,
-        /// The stream returned a 0 sentinel immediately.
-        EmptyProfileName,
-        /// The stream ended before returning the 0 sentinel.
-        UnfinishedProfileName,
-        /// The stream either failed to return a 0 sentinel,
-        /// or the encoded profile name is too long.
-        ProfileNameTooLong,
-        /// The stream ended before returning the compression.
-        MissingCompressionMethod,
-        /// The stream returned an invalid compression method value.
-        InvalidCompressionMethod,
+    pub const ReadNameResult = union(enum) {
+        /// the stream returned the whole string, including the null
+        /// byte separator (not included in the attached result).
+        ok: NameBytes,
+        /// the stream returned the maximum number of bytes allowed
+        /// for the profile name, but returned a non-zero byte when
+        /// the null byte separator was expected.
+        bad_sentinel: BadSentinel,
+        /// the stream returned the maximum number of bytes allowed
+        /// for the profile name, but didn't return a null byte (either
+        /// the stream returned an error or it ended).
+        /// Attached is the array of bytes that the stream returned beforehand.
+        no_sentinel: NoSentinel,
+        /// the stream ended or returned an error before returning
+        /// the null byte separator. Attached is a bounded array of
+        /// what the stream returned beforehand.
+        incomplete: Incomplete,
+        /// the stream immedately returned the null byte separator,
+        /// yielding an empty name.
+        empty_string,
+        /// the stream immedately ended.
+        empty_stream,
+        /// the stream immediately returned an error.
+        immediate_error,
+
+        pub const NameBytes = std.BoundedArray(u8, profile_name_max_length);
+        pub const BadSentinel = struct {
+            name: [profile_name_max_length]u8,
+            sentinel: u8,
+        };
+        pub const NoSentinel = [profile_name_max_length]u8;
+        pub const Incomplete = std.BoundedArray(u8, profile_name_max_length - 1);
+
+        // -- convenience --
+
+        pub const UnwrapError = error{
+            BadSentinel,
+            NoSentinel,
+            Incomplete,
+            EmptyString,
+            EmptyStream,
+            ImmediateError,
+        };
+        /// Converts this union to an error union.
+        /// Tags other than `ok` are errors.
+        pub fn unwrap(result: ReadNameResult) UnwrapError!NameBytes {
+            return switch (result) {
+                .ok => |name| name,
+                .bad_sentinel => error.BadSentinel,
+                .no_sentinel => error.NoSentinel,
+                .incomplete => error.Incomplete,
+                .empty_string => error.EmptyString,
+                .empty_stream => error.EmptyStream,
+                .immediate_error => error.ImmediateError,
+            };
+        }
     };
-    pub fn fromBytes(reader: anytype) (@TypeOf(reader).Error || FromBytesError)!iCCP_Start {
-        const name: ProfileName = blk: {
-            var name: ProfileName = .{
-                .buffer = undefined,
-                .len_minus_one = 1 - 1,
-            };
-            switch (try reader.readAll(name.slice()[0..1])) {
-                0 => return error.NoProfileName,
-                1 => if (name.slice()[name.len() - 1] == 0)
-                    return error.EmptyProfileName,
-                else => unreachable,
+
+    /// Attempts to read the ICC profile name from the stream.
+    ///
+    /// The result of the function call is written to `out`,
+    /// whether returning normally or with a write error.
+    ///
+    /// If the initialised tag is `ok`, the payload is the ICC profile name.
+    /// Otherwise, the tag and payload describe the failure state.
+    ///
+    /// On success, consider calling `validateName*`, to confirm
+    /// whether the result is a valid Latin-1 encoded ICC profile name.
+    pub fn readName(
+        out: *ReadNameResult,
+        reader: anytype,
+    ) @TypeOf(reader).Error!void {
+        out.* = undefined;
+        // just to check the result is a valid value
+        // by the end of the function call
+        defer switch (out.*) {
+            else => {},
+        };
+
+        var name: ReadNameResult.NameBytes = .{};
+        if (util.readByteOrNull(reader) catch |err| {
+            out.* = .immediate_error;
+            return err;
+        }) |first_byte| {
+            if (first_byte == 0) {
+                out.* = .empty_string;
+                return;
             }
-            // NOTE: this is `name.buffer.len + 1` because `.len` doesn't include the 0 sentinel of the array.
-            while (name.len() < name.buffer.len + 1) : (name.len_minus_one += 1) {
-                const byte: u8 = byte: {
-                    var byte: [1]u8 = undefined;
-                    switch (try reader.readAll(&byte)) {
-                        0 => return @as(FromBytesError!iCCP_Start, error.UnfinishedProfileName),
-                        1 => {},
-                        else => unreachable,
-                    }
-                    break :byte @bitCast(u8, byte);
-                };
-                name.buffer[name.len()] = byte;
-                if (byte == 0) break;
-            } else return @as(FromBytesError!iCCP_Start, error.ProfileNameTooLong);
+            name.appendAssumeCapacity(first_byte);
+        } else {
+            out.* = .empty_stream;
+            return;
+        }
 
-            assert(name.slice()[name.len()] == 0);
-            break :blk name;
-        };
-
-        const compression_method: CompressionMethod = blk: {
-            const int: u8 = int: {
-                var byte: [1]u8 = undefined;
-                switch (try reader.readAll(&byte)) {
-                    0 => return @as(FromBytesError!iCCP_Start, error.MissingCompressionMethod),
-                    1 => {},
-                    else => unreachable,
-                }
-                break :int @bitCast(u8, byte);
+        while (name.len < profile_name_max_length) {
+            const maybe_byte = util.readByteOrNull(reader) catch |err| {
+                out.* = .{ .incomplete = ReadNameResult.Incomplete.fromSlice(name.constSlice()) catch unreachable };
+                return err;
             };
-            break :blk util.intToEnum(CompressionMethod, int) orelse
-                return @as(FromBytesError!iCCP_Start, error.InvalidCompressionMethod);
-        };
+            const byte: u8 = maybe_byte orelse {
+                out.* = .{ .incomplete = ReadNameResult.Incomplete.fromSlice(name.constSlice()) catch unreachable };
+                return;
+            };
+            if (byte == 0) break;
+            name.appendAssumeCapacity(byte);
+        } else {
+            assert(name.len == profile_name_max_length);
+            const maybe_byte = util.readByteOrNull(reader) catch |err| {
+                out.* = .{ .no_sentinel = name };
+                return err;
+            };
+            const sentinel_byte: u8 = maybe_byte orelse {
+                out.* = .{ .no_sentinel = name.constSlice()[0..profile_name_max_length].* };
+                return;
+            };
+            if (sentinel_byte != 0) {
+                out.* = .{ .bad_sentinel = ReadNameResult.BadSentinel{
+                    .name = name.constSlice()[0..profile_name_max_length].*,
+                    .sentinel = sentinel_byte,
+                } };
+                return;
+            }
+        }
 
-        return iCCP_Start{
-            .name = name,
-            .compression_method = compression_method,
-        };
+        out.* = .{ .ok = name };
+        return;
     }
 
-    pub const AsBytes = std.BoundedArray(u8, 81);
-    pub fn asBytes(icc_profile: *const iCCP_Start) AsBytes {
-        var bytes = std.BoundedArray(u8, 81){};
-        bytes.appendSliceAssumeCapacity(icc_profile.name.slice());
-        bytes.appendAssumeCapacity(0);
-        bytes.appendAssumeCapacity(@enumToInt(icc_profile.compression_method));
-        return bytes;
+    pub const ValidateNameError = error{
+        /// Encountered a byte representing a non-printable
+        /// character, which also isn't a space.
+        InvalidChar,
+        /// Space encountered before any printable characters.
+        LeadingSpace,
+        /// Space encountered immediately following another space.
+        ConsecutiveSpace,
+        /// Space encountered at the end of the string.
+        TrailingSpace,
+    };
+    /// Validates a slice of bytes returned by `readName`.
+    pub fn validateName(
+        /// Should be from `ReadNameResult.ok`, which was written by a call to `readName`.
+        name: []const u8,
+    ) ValidateNameError!void {
+        var index = {};
+        return @call(.always_inline, validateNameTemplate, .{ name, false, &index });
+    }
+    /// Like `validateName`, but takes an out parameter `index`.
+    pub fn validateNameIndex(
+        /// Should be from `ReadNameResult.ok`, which was written by a call to `readName`.
+        name: []const u8,
+        /// The index in `name` at which the error occurred, if an error occured.
+        index: *usize,
+    ) ValidateNameError!void {
+        @call(.always_inline, validateNameTemplate, .{ name, true, index });
+    }
+    fn validateNameTemplate(
+        name: []const u8,
+        comptime want_index: bool,
+        index: *if (want_index) usize else void,
+    ) ValidateNameError!void {
+        assert(name.len != 0); // shouldn't be possible if this is from `readName`
+        assert(name.len <= profile_name_max_length); // shoudln't be possible if this is from `readName`
+        index.* = undefined;
+
+        @as(error{ LeadingSpace, InvalidChar }!void, switch (name[0]) {
+            32 => error.LeadingSpace,
+            33...126,
+            161...255,
+            => {},
+            else => error.InvalidChar,
+        }) catch |err| {
+            index.* = if (want_index) 0 else {};
+            return err;
+        };
+
+        if (name.len == 1) return;
+
+        @as(error{ TrailingSpace, InvalidChar }!void, switch (name[name.len - 1]) {
+            32 => error.TrailingSpace,
+            33...126,
+            161...255,
+            => {},
+            else => error.InvalidChar,
+        }) catch |err| {
+            index.* = if (want_index) name.len - 1 else {};
+            return err;
+        };
+
+        var state: enum { print, space } = .print;
+
+        for (name[1..]) |char, i| {
+            errdefer index.* = if (want_index) i + 1 else {};
+            switch (state) {
+                .print => switch (char) {
+                    32 => state = .space,
+                    33...126,
+                    161...255,
+                    => {},
+                    else => return error.InvalidChar,
+                },
+                .space => switch (char) {
+                    32 => return error.ConsecutiveSpace,
+                    33...126,
+                    161...255,
+                    => state = .print,
+                    else => return error.InvalidChar,
+                },
+            }
+        }
     }
 
     pub const CompressionMethod = enum(u8) {
         /// zlib datastream with deflate compression
         method_0,
-    };
 
-    pub const ProfileName = struct {
-        buffer: [79:0]u8,
-        len_minus_one: LenMinusOne,
-
-        pub const LenMinusOne = std.math.IntFittingRange(1 - 1, 79 - 1);
-
-        pub inline fn fromString(string: []const u8) error{ EmptyString, TooLong }!ProfileName {
-            var result = ProfileName{
-                .buffer = undefined,
-                .len_minus_one = undefined,
-            };
-            if (string.len == 0) return error.EmptyString;
-            if (string.len > result.buffer.len) return error.TooLong;
-            result.len_minus_one = @intCast(ProfileName.LenMinusOne, string.len - 1);
-            result.buffer[result.len()] = 0;
-            std.mem.copy(u8, result.slice(), string);
-            return result;
+        pub inline fn toByte(method: CompressionMethod) u8 {
+            return @enumToInt(method);
         }
 
-        pub fn Slice(comptime PointerToProfileName: type) type {
-            var pointer_info = @typeInfo(PointerToProfileName).Pointer;
-            assert(pointer_info.child == ProfileName);
-            assert(pointer_info.size == .One);
-            assert(pointer_info.sentinel == null);
-
-            pointer_info.alignment = 1;
-            pointer_info.child = u8;
-            pointer_info.size = .Slice;
-            pointer_info.sentinel = &@as(u8, 0);
-            return @Type(.{ .Pointer = pointer_info });
-        }
-        pub inline fn slice(name: anytype) Slice(@TypeOf(name)) {
-            return name.buffer[0..len(name.*) :0];
-        }
-
-        pub const Len = std.math.IntFittingRange(1, 79);
-        pub inline fn len(name: ProfileName) Len {
-            return @as(Len, name.len_minus_one) + 1;
+        pub inline fn fromByte(byte: u8) ?CompressionMethod {
+            return util.intToEnum(CompressionMethod, byte);
         }
     };
 };
+test iCCP {
+    var fbs = std.io.fixedBufferStream(&[_]u8{ 'f', 'o', 'o', ' ', 'b', 'a', 'r', 0, @enumToInt(iCCP.CompressionMethod.method_0) });
+    const fbr = fbs.reader();
 
-test iCCP_Start {
-    const icc_profile = comptime iCCP_Start{
-        .name = iCCP_Start.ProfileName.fromString("foobar") catch unreachable,
-        .compression_method = .method_0,
-    };
+    var maybe_name: iCCP.ReadNameResult = undefined;
+    iCCP.readName(&maybe_name, fbr) catch |err| switch (err) {};
+    try std.testing.expectEqual(iCCP.ReadNameResult.ok, maybe_name);
+    try std.testing.expectEqual(@as(iCCP.ValidateNameError!void, {}), iCCP.validateName(maybe_name.ok.constSlice()));
+    try std.testing.expectEqualStrings(maybe_name.ok.constSlice(), "foo bar");
 
-    var fbs = std.io.fixedBufferStream(comptime icc_profile.asBytes().constSlice());
-    try std.testing.expectEqual(
-        @as(iCCP_Start.FromBytesError!iCCP_Start, icc_profile),
-        iCCP_Start.fromBytes(fbs.reader()),
-    );
-    try std.testing.expectEqualStrings("foobar", icc_profile.name.slice());
+    try std.testing.expectEqual(@as(?iCCP.CompressionMethod, .method_0), iCCP.CompressionMethod.fromByte(try fbr.readByte()));
+}
+
+/// Returns a formatter for a Latin-1 string.
+/// This may be useful, because Latin-1 is encoding
+/// of the textual data in various PNG chunks.
+pub inline fn fmtLatin1(latin1_string: []const u8) FmtLatin1 {
+    return .{ .latin1_string = latin1_string };
+}
+pub const FmtLatin1 = struct {
+    latin1_string: []const u8,
+
+    pub fn format(
+        formatter: FmtLatin1,
+        comptime fmt_str: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) @TypeOf(writer).Error!void {
+        comptime assert(fmt_str.len == 0);
+        _ = options;
+        for (formatter.latin1_string) |char| {
+            var cp_buf: [4]u8 = undefined;
+            // none of the errors returned by this function should
+            // be applicable to codepoints this small,
+            // so mark as unreachable.
+            const cp_byte_len = std.unicode.utf8Encode(char, &cp_buf) catch unreachable;
+            try writer.writeAll(cp_buf[0..cp_byte_len]);
+        }
+    }
+};
+test fmtLatin1 {
+    try std.testing.expectFmt("abc", "{}", .{fmtLatin1("abc")}); // ascii strings obviously work
+    try std.testing.expectFmt("ß Ø £", "{}", .{fmtLatin1(&[_]u8{ 'ß', ' ', 'Ø', ' ', '£' })});
 }
 
 const util = struct {
-    inline fn intToEnum(comptime Enum: type, int: @typeInfo(Enum).Enum.tag_type) ?Enum {
+    /// Read a byte from the stream, or return null if the stream is empty.
+    inline fn readByteOrNull(reader: anytype) @TypeOf(reader).Error!?u8 {
+        var byte: [1]u8 = undefined;
+        return switch (try reader.read(&byte)) {
+            0 => null,
+            1 => @bitCast(u8, byte),
+            else => unreachable,
+        };
+    }
+
+    fn intToEnum(comptime Enum: type, int: @typeInfo(Enum).Enum.tag_type) ?Enum {
         inline for (@typeInfo(Enum).Enum.fields) |field| {
             if (int == field.value)
                 return @field(Enum, field.name);
         }
         return null;
-    }
-
-    fn MemoizedErrSet(comptime ErrSet: type) type {
-        const set = @typeInfo(ErrSet).ErrorSet orelse return anyerror;
-        var errors: [set.len]anyerror = undefined;
-        for (errors) |*err, i|
-            err.* = @field(ErrSet, set[i].name);
-        return MemoizedErrSetImpl(errors);
-    }
-
-    fn MemoizedErrSetImpl(
-        comptime error_count: comptime_int,
-        comptime errors: [error_count]anyerror,
-    ) type {
-        var set: [errors.len]std.builtin.Type.Error = undefined;
-        for (set) |*err, i|
-            err.* = .{ .name = @errorName(errors[i]) };
-        return @Type(.{ .ErrorSet = &errors });
     }
 };
