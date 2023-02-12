@@ -22,8 +22,8 @@ pub const ChunkHeader = struct {
     }
 
     pub fn toBytes(chunk_header: ChunkHeader) [8]u8 {
-        var bytes: [8]u8 = undefined;
-        std.mem.writeIntBig(u32, bytes[0..4], chunk_header.length);
+        var bytes: [8]u8 align(@alignOf(u32)) = undefined;
+        @ptrCast(*u32, bytes[0..4]).* = std.mem.nativeToBig(u32, chunk_header.length);
         bytes[4..8].* = chunk_header.type.string();
         return bytes;
     }
@@ -115,6 +115,217 @@ test ChunkType {
         try std.testing.expect(!ChunkType.isPrivate(tag)); // only allow for public chunk types among the named fields
     }
 }
+
+pub fn ChunkIterator(comptime ReaderType: type) type {
+    return struct {
+        const Self = @This();
+        inner: Inner,
+        remaining_bytes: u31 = undefined,
+        crc_hasher: std.hash.Crc32 = std.hash.Crc32.init(),
+        expected_crc: ?u32 = null,
+        state: State = .start,
+
+        const State = enum {
+            start,
+            end,
+            expecting_header,
+            exhausting_data,
+        };
+
+        pub const SignatureCheck = ChunkIteratorSignatureCheck;
+        /// The result describes whether the PNG
+        /// signature was attained correctly from
+        /// the stream.
+        pub fn checkSignature(iter: *Self) Inner.Error!SignatureCheck {
+            var out: SignatureCheck = undefined;
+            try @call(.always_inline, checkSignatureAdvanced, .{ iter, &out });
+            return out;
+        }
+        /// The result is written to `out`, whether
+        /// returning normally or with an error. It
+        /// describes whether the PNG signature was
+        /// attained correctly from the stream.
+        pub fn checkSignatureAdvanced(iter: *Self, out: *SignatureCheck) Inner.Error!void {
+            switch (iter.state) {
+                .start => {},
+                else => unreachable,
+            }
+
+            out.* = undefined;
+            defer switch (out.*) {
+                else => {},
+            };
+
+            var bytes: std.BoundedArray(u8, png_signature.len) = .{};
+            iter.inner.readIntoBoundedBytes(png_signature.len, &bytes) catch |err| {
+                assert(bytes.len < png_signature.len);
+                out.* = .{ .incomplete_signature = std.BoundedArray(u8, png_signature.len).fromSlice(bytes.constSlice()) catch unreachable };
+                iter.state = .end;
+                return err;
+            };
+            if (bytes.len < png_signature.len) {
+                out.* = .{ .incomplete_signature = std.BoundedArray(u8, png_signature.len - 1).fromSlice(bytes.constSlice()) catch unreachable };
+                iter.state = .end;
+                return;
+            }
+            if (!std.mem.eql(u8, bytes.constSlice(), &png_signature)) {
+                out.* = .{ .bad_signature = bytes.constSlice()[0..png_signature.len].* };
+                iter.state = .end;
+                return;
+            }
+
+            out.* = .ok;
+            iter.state = .expecting_header;
+            return;
+        }
+
+        pub const NextResult = ChunkIteratorNextResult;
+        /// The result describes whether the chunk
+        /// header was attained from the stream and
+        /// decoded correctly.
+        pub fn next(iter: *Self) Inner.Error!NextResult {
+            var out: NextResult = undefined;
+            try @call(.always_inline, nextAdvanced, .{ iter, &out });
+            return out;
+        }
+        /// The result is written to `out`, whether
+        /// returning normally or with an error. It
+        /// describes whether the chunk header was
+        /// attained from the stream and decoded correctly.
+        pub fn nextAdvanced(iter: *Self, out: *NextResult) Inner.Error!void {
+            switch (iter.state) {
+                .end => {
+                    out.* = .none;
+                    return;
+                },
+                .expecting_header => {
+                    assert(iter.expected_crc == null);
+                },
+                .exhausting_data => {
+                    assert(iter.remaining_bytes == 0); // caller is meant to exhaust the stream returned by `.reader()`
+                    assert(iter.expected_crc != null); // caller is meant to first call `.fetchExpectedCrc()`
+                    iter.remaining_bytes = undefined;
+                    iter.expected_crc = null;
+                    iter.state = .expecting_header;
+                },
+                else => unreachable,
+            }
+
+            var bytes: std.BoundedArray(u8, 8) = .{};
+            iter.inner.readIntoBoundedBytes(8, &bytes) catch |err| {
+                out.* = .{ .incomplete_bytes = std.BoundedArray(u8, 8 - 1).fromSlice(bytes.constSlice()) catch unreachable };
+                iter.state = .end;
+                return err;
+            };
+            if (bytes.len < 8) {
+                out.* = .{ .incomplete_bytes = std.BoundedArray(u8, 8 - 1).fromSlice(bytes.constSlice()) catch unreachable };
+                iter.state = .end;
+                return;
+            }
+            const header = ChunkHeader.fromBytes(bytes.constSlice()[0..8]) catch |err| {
+                out.* = switch (err) {
+                    error.InvalidLength => .{ .invalid_length = std.mem.readIntBig(u32, bytes.constSlice()[0..4]) },
+                    error.InvalidChunkType => .{ .invalid_chunk_type = NextResult.InvalidChunkType{
+                        .length = @intCast(u31, std.mem.readIntBig(u32, bytes.constSlice()[0..4])),
+                        .type = std.mem.readIntBig(u32, bytes.constSlice()[4..8]),
+                    } },
+                };
+                iter.state = .end;
+                return;
+            };
+            out.* = .{ .ok = header };
+            iter.state = .exhausting_data;
+            iter.remaining_bytes = header.length;
+            iter.crc_hasher = std.hash.Crc32.init();
+            iter.crc_hasher.update(&header.type.string());
+        }
+
+        /// Returns true on successfully reading the CRC code,
+        /// false if the stream ended before returning it fully.
+        pub fn fetchExpectedCrc(iter: *Self) Inner.Error!bool {
+            assert(iter.remaining_bytes == 0); // caller is meant to exhaust the stream returned by `.reader()`.
+            assert(iter.expected_crc == null);
+
+            var crc_code_bytes: std.BoundedArray(u8, 4) = .{};
+            iter.inner.readIntoBoundedBytes(4, &crc_code_bytes) catch |err| {
+                return err;
+            };
+            if (crc_code_bytes.len < 4) {
+                return false;
+            }
+            const crc_code = std.mem.readIntBig(u32, crc_code_bytes.constSlice()[0..4]);
+            iter.expected_crc = crc_code;
+            return true;
+        }
+
+        pub const CrcCodes = struct { expected: u32, actual: u32 };
+        pub fn getCrc(iter: *Self) CrcCodes {
+            assert(iter.remaining_bytes == 0);
+            var crc_hasher_copy = iter.crc_hasher;
+            return .{
+                .expected = iter.expected_crc.?,
+                .actual = crc_hasher_copy.final(),
+            };
+        }
+
+        pub const Inner = ReaderType;
+        pub const Reader = std.io.Reader(*Self, Inner.Error, read);
+        /// The caller should read all the bytes from this stream before a subsequent call to `next`.
+        pub inline fn reader(iter: *Self) Reader {
+            assert(iter.remaining_bytes != 0);
+            assert(iter.expected_crc == null);
+            return .{ .context = iter };
+        }
+
+        fn read(iter: *Self, buffer: []u8) Inner.Error!usize {
+            if (buffer.len == 0) return 0;
+            if (iter.remaining_bytes == 0) return 0;
+            const amt = @intCast(u31, @min(buffer.len, iter.remaining_bytes));
+            const bytes_read = @intCast(u31, try iter.inner.read(buffer[0..amt]));
+            iter.crc_hasher.update(buffer[0..bytes_read]);
+            iter.remaining_bytes -= bytes_read;
+            return bytes_read;
+        }
+    };
+}
+pub inline fn chunkIterator(reader: anytype) ChunkIterator(@TypeOf(reader)) {
+    return .{ .inner = reader };
+}
+pub const ChunkIteratorSignatureCheck = union(enum) {
+    ok,
+    bad_signature: [png_signature.len]u8,
+    incomplete_signature: std.BoundedArray(u8, png_signature.len - 1),
+
+    pub inline fn unwrap(result: ChunkIteratorSignatureCheck) error{ BadPngSignature, IncompletePngSignature }!void {
+        return switch (result) {
+            .ok => {},
+            .bad_signature => error.BadPngSignature,
+            .incomplete_signature => error.IncompletePngSignature,
+        };
+    }
+};
+pub const ChunkIteratorNextResult = union(enum) {
+    none,
+    ok: ChunkHeader,
+    incomplete_bytes: std.BoundedArray(u8, 8 - 1),
+    invalid_length: u32,
+    invalid_chunk_type: InvalidChunkType,
+
+    pub const InvalidChunkType = struct {
+        length: u31,
+        type: u32,
+    };
+
+    pub inline fn unwrap(result: ChunkIteratorNextResult) error{ IncompleteBytes, InvalidLength, InvalidChunkType }!?ChunkHeader {
+        return switch (result) {
+            .none => null,
+            .ok => |header| header,
+            .incomplete_bytes => error.IncompleteBytes,
+            .invalid_length => error.InvalidLength,
+            .invalid_chunk_type => error.InvalidChunkType,
+        };
+    }
+};
 
 pub const IHDR = struct {
     pub const Data = struct {
