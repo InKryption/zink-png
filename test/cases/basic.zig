@@ -5,7 +5,7 @@ const basic_png = @embedFile("basic.png");
 
 fn expectChunkData(
     chunk_iter: anytype,
-    expected_header: ?png.ChunkHeader,
+    expected_header: ?png.chunk.Header,
     expected_data: []const u8,
 ) !void {
     const data_reader = chunk_iter.dataReader();
@@ -13,8 +13,8 @@ fn expectChunkData(
         std.debug.assert(expected_data.len == 0);
     }
 
-    const actual_header: png.ChunkHeader = blk: {
-        var next_result: png.ChunkIteratorNextResult = undefined;
+    const actual_header: png.chunk.Header = blk: {
+        var next_result: png.chunk.IteratorNextResult = undefined;
         try chunk_iter.nextAdvanced(&next_result); // handle read errors
         const maybe_header = try next_result.unwrap();
         break :blk maybe_header orelse
@@ -33,12 +33,12 @@ fn expectChunkData(
 
 test {
     var fbs = std.io.fixedBufferStream(basic_png);
-    var iter = png.chunkIterator(fbs.reader(), true);
+    var iter = png.chunk.iterator(fbs.reader(), true);
 
     try (try iter.checkSignature()).unwrap();
     while (true) {
-        const header: png.ChunkHeader = blk: {
-            var next_result: png.ChunkIteratorNextResult = undefined;
+        const header: png.chunk.Header = blk: {
+            var next_result: png.chunk.IteratorNextResult = undefined;
             iter.nextAdvanced(&next_result) catch |err| switch (err) {}; // handle read errors
             const maybe_header = try next_result.unwrap();
             break :blk maybe_header orelse break;
@@ -73,10 +73,10 @@ test {
     // test contents
 
     fbs.reset();
-    iter = png.chunkIterator(fbs.reader(), true);
+    iter = png.chunk.iterator(fbs.reader(), true);
 
     {
-        var signature_check: png.ChunkIteratorSignatureCheck = undefined;
+        var signature_check: png.chunk.IteratorSignatureCheck = undefined;
         iter.checkSignatureAdvanced(&signature_check) catch |err| switch (err) {}; // handle read errors
         try signature_check.unwrap();
     }
@@ -84,7 +84,7 @@ test {
     try expectChunkData(
         &iter,
         .{ .type = .IHDR, .length = 13 },
-        &png.IHDR.Data.toBytes(.{
+        &png.chunk.IHDR.Data.toBytes(.{
             .width = 10,
             .height = 10,
             .bit_depth = .@"8",

@@ -132,6 +132,48 @@ test Type {
     }
 }
 
+/// Returns an iterator that reads bytes from the given stream,
+/// and outputs chunk headers, providing a wrapped stream that
+/// the caller should use to retrieve the bytes following each
+/// chunk (the stream will make sure it only returns the content
+/// of the current chunk).
+pub inline fn iterator(
+    reader: anytype,
+    /// Enables calculating the CRC code.
+    comptime calculate_crc: bool,
+) Iterator(@TypeOf(reader), calculate_crc) {
+    return .{ .inner = reader };
+}
+pub const IteratorSignatureCheck = union(enum) {
+    ok,
+    bad_signature: [png.signature.len]u8,
+    incomplete_signature: std.BoundedArray(u8, png.signature.len - 1),
+
+    pub const UnwrapError = error{ BadPngSignature, IncompletePngSignature };
+    pub inline fn unwrap(result: IteratorSignatureCheck) UnwrapError!void {
+        return switch (result) {
+            .ok => {},
+            .bad_signature => error.BadPngSignature,
+            .incomplete_signature => error.IncompletePngSignature,
+        };
+    }
+};
+pub const IteratorNextResult = union(enum) {
+    none,
+    ok: Header,
+    incomplete_chunk_header: std.BoundedArray(u8, 8 - 1),
+    invalid_chunk_header: Header.Raw,
+
+    pub const UnwrapError = error{ IncompleteBytes, InvalidChunkHeader };
+    pub inline fn unwrap(result: IteratorNextResult) UnwrapError!?Header {
+        return switch (result) {
+            .none => null,
+            .ok => |header| header,
+            .incomplete_chunk_header => error.IncompleteBytes,
+            .invalid_chunk_header => error.InvalidChunkHeader,
+        };
+    }
+};
 pub fn Iterator(
     comptime ReaderType: type,
     /// Enables calculating the CRC code.
@@ -142,21 +184,17 @@ pub fn Iterator(
         inner: Inner,
         remaining_bytes: u31 = undefined,
         crc_hasher: if (calculate_crc) std.hash.Crc32 else void = if (calculate_crc) std.hash.Crc32.init() else {},
-        expected_crc: ?u32 = null,
+        expected_crc: u32 = undefined,
         state: State = .start,
 
-        const State = enum {
-            start,
-            end,
-            expecting_header,
-            exhausting_data,
-            got_expected_crc,
-        };
+        pub const Inner = ReaderType;
 
         pub const SignatureCheck = IteratorSignatureCheck;
         /// The result describes whether the PNG
         /// signature was attained correctly from
         /// the stream.
+        ///
+        /// On successful return, the caller can call `next*`.
         pub fn checkSignature(iter: *Self) Inner.Error!SignatureCheck {
             var out: SignatureCheck = undefined;
             try @call(.always_inline, checkSignatureAdvanced, .{ iter, &out });
@@ -166,6 +204,8 @@ pub fn Iterator(
         /// returning normally or with an error. It
         /// describes whether the PNG signature was
         /// attained correctly from the stream.
+        ///
+        /// On successful return, the caller can call `next*`.
         pub fn checkSignatureAdvanced(iter: *Self, out: *SignatureCheck) Inner.Error!void {
             switch (iter.state) {
                 .start => {},
@@ -208,6 +248,9 @@ pub fn Iterator(
         /// The result describes whether the chunk
         /// header was attained from the stream and
         /// decoded correctly.
+        ///
+        /// On successful return, the caller should exhaust
+        /// the stream returned by `dataReader`.
         pub fn next(iter: *Self) Inner.Error!NextResult {
             var out: NextResult = undefined;
             try @call(.always_inline, nextAdvanced, .{ iter, &out });
@@ -217,6 +260,9 @@ pub fn Iterator(
         /// returning normally or with an error. It
         /// describes whether the chunk header was
         /// attained from the stream and decoded correctly.
+        ///
+        /// On successful return, the caller should exhaust
+        /// the stream returned by `dataReader`.
         pub fn nextAdvanced(iter: *Self, out: *NextResult) Inner.Error!void {
             switch (iter.state) {
                 .start => unreachable, // meant to call `checkSignature*` first.s
@@ -224,15 +270,12 @@ pub fn Iterator(
                     out.* = .none;
                     return;
                 },
-                .expecting_header => {
-                    assert(iter.expected_crc == null);
-                },
+                .expecting_header => {},
                 .exhausting_data => unreachable, // supposed to call meant to call `fetchExpectedCrc` first.
                 .got_expected_crc => {
                     assert(iter.remaining_bytes == 0);
-                    assert(iter.expected_crc != null);
                     iter.remaining_bytes = undefined;
-                    iter.expected_crc = null;
+                    iter.expected_crc = undefined;
                 },
             }
 
@@ -272,10 +315,26 @@ pub fn Iterator(
             iter.crc_hasher.update(&header.type.string());
         }
 
+        pub const DataReader = std.io.Reader(*Self, Inner.Error, readData);
+        /// Returns a stream that returns the raw contents
+        /// of the current chunk.
+        ///
+        /// The caller should exhaust this stream, and
+        /// then call `fetchExpectedCrc`.
+        /// The caller may also call `getActualCrc`
+        /// after exhausting this stream.
+        pub inline fn dataReader(iter: *Self) DataReader {
+            return .{ .context = iter };
+        }
+
         /// Returns true on successfully reading the CRC code,
         /// false if the stream ended before returning it fully.
         /// Returning a read error implies the same as returning false.
-        /// Also see `getExpectedCrc` and `getActualCrc`.
+        ///
+        /// The caller may also call `getExpectedCrc`
+        /// after calling this function.
+        /// The caller may also call `next*` after
+        /// calling this function, but not before `getExpectedCrc`.
         pub fn fetchExpectedCrc(iter: *Self) Inner.Error!bool {
             switch (iter.state) {
                 .start,
@@ -286,7 +345,6 @@ pub fn Iterator(
                 .got_expected_crc => unreachable, // shouldn't call twice
                 .exhausting_data => {
                     assert(iter.remaining_bytes == 0); // caller is meant to exhaust the stream returned by `.dataReader()`.
-                    assert(iter.expected_crc == null);
                 },
             }
 
@@ -305,32 +363,58 @@ pub fn Iterator(
             return true;
         }
 
-        /// Get the CRC code found after the chunk data.
-        pub inline fn getExpectedCrc(iter: *const Self) u32 {
-            assert(iter.remaining_bytes == 0); //
-            // if null, the caller probably forgot to call `fetchExpectedCrc`
-            return iter.expected_crc.?;
-        }
-
-        /// Get the CRC code calculated based off of the
-        /// data read from the stream.
+        /// Get the CRC code which was calculated
+        /// based off of the data read from the stream.
         pub inline fn getActualCrc(iter: *const Self) u32 {
             comptime assert(calculate_crc); // must enable CRC calculation in order to use this
+            switch (iter.state) {
+                .start,
+                .end,
+                .expecting_header,
+                => unreachable, //  not valid to call yet
+
+                .exhausting_data,
+                .got_expected_crc,
+                => {},
+            }
             assert(iter.remaining_bytes == 0); // must exhaust the data reader stream first
             var hasher_copy: std.hash.Crc32 = iter.crc_hasher;
             return hasher_copy.final();
         }
 
-        pub const Inner = ReaderType;
-        pub const DataReader = std.io.Reader(*Self, Inner.Error, read);
-        /// The caller should read all the bytes from this
-        /// stream before calling `fetchExpectedCrc`, which
-        /// must be called before a subsequent call to `next*`.
-        pub inline fn dataReader(iter: *Self) DataReader {
-            return .{ .context = iter };
+        /// Get the CRC code found after the chunk data.
+        /// Must only be called after calling `fetchExpectedCrc`.
+        pub inline fn getExpectedCrc(iter: *const Self) u32 {
+            switch (iter.state) {
+                .start,
+                .end,
+                .expecting_header,
+                => unreachable, //  not valid to call yet
+
+                .exhausting_data => unreachable, // must first call `fetchExpectedCrc`.
+                .got_expected_crc => {},
+            }
+            assert(iter.remaining_bytes == 0); // the caller probably forgot to exhaust the `dataReader` stream.
+            return iter.expected_crc;
         }
 
-        fn read(iter: *Self, buffer: []u8) Inner.Error!usize {
+        const State = enum {
+            start,
+            end,
+            expecting_header,
+            exhausting_data,
+            got_expected_crc,
+        };
+
+        fn readData(iter: *Self, buffer: []u8) Inner.Error!usize {
+            switch (iter.state) {
+                .start,
+                .end,
+                .expecting_header,
+                .got_expected_crc,
+                => unreachable, // should only read from this stream after calling `next`.
+                .exhausting_data => {},
+            }
             if (buffer.len == 0) return 0;
             if (iter.remaining_bytes == 0) return 0;
             const amt = @intCast(u31, @min(buffer.len, iter.remaining_bytes));
@@ -343,41 +427,6 @@ pub fn Iterator(
         }
     };
 }
-pub inline fn iterator(
-    reader: anytype,
-    /// Enables calculating the CRC code.
-    comptime calculate_crc: bool,
-) Iterator(@TypeOf(reader), calculate_crc) {
-    return .{ .inner = reader };
-}
-pub const IteratorSignatureCheck = union(enum) {
-    ok,
-    bad_signature: [png.signature.len]u8,
-    incomplete_signature: std.BoundedArray(u8, png.signature.len - 1),
-
-    pub inline fn unwrap(result: IteratorSignatureCheck) error{ BadPngSignature, IncompletePngSignature }!void {
-        return switch (result) {
-            .ok => {},
-            .bad_signature => error.BadPngSignature,
-            .incomplete_signature => error.IncompletePngSignature,
-        };
-    }
-};
-pub const IteratorNextResult = union(enum) {
-    none,
-    ok: Header,
-    incomplete_chunk_header: std.BoundedArray(u8, 8 - 1),
-    invalid_chunk_header: Header.Raw,
-
-    pub inline fn unwrap(result: IteratorNextResult) error{ IncompleteBytes, InvalidChunkHeader }!?Header {
-        return switch (result) {
-            .none => null,
-            .ok => |header| header,
-            .incomplete_chunk_header => error.IncompleteBytes,
-            .invalid_chunk_header => error.InvalidChunkHeader,
-        };
-    }
-};
 
 pub const IHDR = struct {
     pub const Data = struct {
