@@ -1,3 +1,8 @@
+//! This file is comprised of a data structure representing a chunk header,
+//! an enum representing chunk types, a chunk iterator, and a collection of namespaces,
+//! each representing a PNG chunk type, containing data structures and tools
+//! for working with chunk data.
+
 const std = @import("std");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
